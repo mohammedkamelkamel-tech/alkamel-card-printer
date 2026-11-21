@@ -6,10 +6,21 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      build_release:
+        description: 'بناء نسخة Release المضغوطة (R8) بالإضافة إلى Debug APK'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -21,27 +32,40 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle 8.9
+      - name: Accept Android SDK licenses (non-interactive)
+        shell: bash
+        run: |
+          SDK_MANAGER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDK_MANAGER" ]; then
+            yes | "$SDK_MANAGER" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Setup Gradle 8.9 with Caching
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+          cache-read-only: false
 
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace --no-daemon
-
-      - name: Build Release Unsigned APK
-        run: gradle assembleRelease --stacktrace --no-daemon
+        run: gradle :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=4
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: alkamel-card-printer-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
           retention-days: 14
 
-      - name: Upload Release APK
+      - name: Build Release Unsigned APK (Optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
+        run: gradle :app:assembleRelease --no-daemon --stacktrace --console=plain --max-workers=4
+
+      - name: Upload Release APK (Optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
         uses: actions/upload-artifact@v4
         with:
           name: alkamel-card-printer-release-apk
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
           retention-days: 14
