@@ -81,7 +81,7 @@ fun ReportsScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             AlkamelTopHeader(
-                title = "التقارير والإحصائيات",
+                title = "تقارير وإحصائيات يوزر منجر",
                 onNavigateBack = onNavigateBack,
                 trailingAction = {
                     IconButton(

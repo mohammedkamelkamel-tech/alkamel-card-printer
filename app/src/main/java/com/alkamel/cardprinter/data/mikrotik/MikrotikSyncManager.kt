@@ -13,9 +13,10 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
- * Coordinates real RouterOS v6 / v7 API data fetching, live telemetry polling,
- * per-card User Manager & Hotspot session lookup, live reports aggregation,
- * and live card pushing directly into MikroTik and Room. Zero fake or placeholder data.
+ * Coordinates real RouterOS v6 / v7 User Manager API data fetching, live telemetry polling,
+ * per-card User Manager session lookup, live User Manager reports aggregation,
+ * and live card pushing directly into MikroTik User Manager and Room.
+ * Strictly User Manager only — zero Hotspot profiles, cards, or operations.
  */
 object MikrotikSyncManager {
 
@@ -36,7 +37,7 @@ object MikrotikSyncManager {
                     return@withContext MikrotikConnectionTestResult(
                         isConnected = false,
                         errorMessage = loginResult.exceptionOrNull()?.localizedMessage
-                            ?: "تعذر الاتصال بسيرفر المايكروتيك."
+                            ?: "تعذر الاتصال بسيرفر يوزر منجر."
                     )
                 }
                 val status = fetchSystemStatusInternal(client)
@@ -52,8 +53,7 @@ object MikrotikSyncManager {
         }
 
     /**
-     * Fast, lightweight live telemetry fetch used by periodic polling on Dashboard
-     * (reads only /system/resource/print + active connections without reloading all cards).
+     * Fast, lightweight live telemetry fetch used by periodic polling on Dashboard.
      */
     suspend fun fetchLiveTelemetry(credentials: MikrotikCredentials): Result<MikrotikSystemStatus> =
         withContext(Dispatchers.IO) {
@@ -62,7 +62,7 @@ object MikrotikSyncManager {
                 val loginRes = client.connectAndLogin(credentials)
                 if (loginRes.isFailure) {
                     return@withContext Result.failure(
-                        loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بالمايكروتيك")
+                        loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بسيرفر يوزر منجر")
                     )
                 }
                 val status = fetchSystemStatusInternal(client)
@@ -82,15 +82,15 @@ object MikrotikSyncManager {
     ): Result<MikrotikSyncSummary> = withContext(Dispatchers.IO) {
         val client = MikrotikApiClient(connectTimeoutMs = 6000, readTimeoutMs = 20000)
         try {
-            onProgress(10, "جاري الاتصال بسيرفر المايكروتيك...")
+            onProgress(10, "جاري الاتصال بسيرفر يوزر منجر...")
             val loginRes = client.connectAndLogin(credentials)
             if (loginRes.isFailure) {
                 return@withContext Result.failure(
-                    loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بالمايكروتيك")
+                    loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بسيرفر يوزر منجر")
                 )
             }
 
-            onProgress(25, "جاري جلب حالة النظام من المايكروتيك...")
+            onProgress(25, "جاري جلب حالة النظام من السيرفر...")
             val sysStatus = fetchSystemStatusInternal(client)
             val isV7 = sysStatus.routerOsVersion.trim().startsWith("7")
 
@@ -98,8 +98,8 @@ object MikrotikSyncManager {
             var syncedCardsCount = 0
 
             if (loadType != NetworkLoadType.NO_LOAD) {
-                onProgress(45, "جاري جلب الباقات الفعلية من المايكروتيك...")
-                val fetchedPackages = fetchPackagesInternal(client, isV7, loadType)
+                onProgress(45, "جاري جلب باقات يوزر منجر الفعلية...")
+                val fetchedPackages = fetchUserManagerPackagesInternal(client, isV7)
                 val mergedPackages = if (fetchedPackages.isNotEmpty()) {
                     syncedPackagesCount = fetchedPackages.size
                     repository.mergePackagesFromMikrotik(fetchedPackages).getOrDefault(fetchedPackages)
@@ -107,23 +107,22 @@ object MikrotikSyncManager {
                     repository.getAllPackagesOnce()
                 }
 
-                onProgress(70, "جاري جلب الكروت والجلسات الفعلية...")
+                onProgress(70, "جاري جلب كروت وجلسات يوزر منجر...")
                 val priceByPackage = mergedPackages.associate { it.name.lowercase() to it.price }
-                val fetchedCards = fetchCardsInternal(
+                val fetchedCards = fetchUserManagerCardsInternal(
                     client = client,
                     isV7 = isV7,
-                    loadType = loadType,
                     serverAccount = credentials.username,
                     priceByPackage = priceByPackage
                 )
                 if (fetchedCards.isNotEmpty()) {
-                    onProgress(88, "جاري حفظ ${fetchedCards.size} كرت في قاعدة البيانات...")
+                    onProgress(88, "جاري حفظ ${fetchedCards.size} كرت يوزر منجر في قاعدة البيانات...")
                     repository.syncCardsFromMikrotik(fetchedCards)
                     syncedCardsCount = fetchedCards.size
                 }
             }
 
-            onProgress(100, "تم تحديث الكروت والجلسات بالكامل")
+            onProgress(100, "تم تحديث كروت وجلسات يوزر منجر بالكامل")
             Result.success(
                 MikrotikSyncSummary(
                     systemStatus = sysStatus,
@@ -140,12 +139,12 @@ object MikrotikSyncManager {
     }
 
     /**
-     * Fetches detailed session history + any currently active session for a single card username
-     * directly from MikroTik (RouterOS v6/v7 User Manager & Hotspot) and caches them in Room.
+     * Fetches detailed User Manager session history for a single card username
+     * directly from RouterOS v6/v7 User Manager and caches it in Room.
      */
     suspend fun fetchSessionsForUser(
         credentials: MikrotikCredentials,
-        loadType: NetworkLoadType,
+        @Suppress("UNUSED_PARAMETER") loadType: NetworkLoadType,
         username: String,
         repository: CardPrinterRepository
     ): Result<List<CardSessionEntity>> = withContext(Dispatchers.IO) {
@@ -158,7 +157,7 @@ object MikrotikSyncManager {
             val loginRes = client.connectAndLogin(credentials)
             if (loginRes.isFailure) {
                 return@withContext Result.failure(
-                    loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بسيرفر المايكروتيك.")
+                    loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بسيرفر يوزر منجر.")
                 )
             }
             val resourceRes = client.execute("/system/resource/print").getOrNull()
@@ -168,103 +167,52 @@ object MikrotikSyncManager {
             val sessions = mutableListOf<CardSessionEntity>()
             val nowMillis = System.currentTimeMillis()
 
-            // 1. User Manager sessions filtered server-side by ?user=<username>
-            if (loadType == NetworkLoadType.LOAD_USER_MANAGER || loadType == NetworkLoadType.LOAD_ALL) {
-                val primaryCmd = if (isV7) "/user-manager/session/print" else "/tool/user-manager/session/print"
-                val fallbackCmd = if (isV7) "/tool/user-manager/session/print" else "/user-manager/session/print"
-                val umRecords = client.execute(primaryCmd, listOf("?user=$cleanUser"))
+            // Strictly User Manager sessions filtered server-side by ?user=<username>
+            val primaryCmd = if (isV7) "/user-manager/session/print" else "/tool/user-manager/session/print"
+            val fallbackCmd = if (isV7) "/tool/user-manager/session/print" else "/user-manager/session/print"
+            val umRecords = client.execute(primaryCmd, listOf("?user=$cleanUser"))
+                .getOrNull()?.takeIf { it.isSuccess }?.records
+                ?: client.execute(fallbackCmd, listOf("?user=$cleanUser"))
                     .getOrNull()?.takeIf { it.isSuccess }?.records
-                    ?: client.execute(fallbackCmd, listOf("?user=$cleanUser"))
-                        .getOrNull()?.takeIf { it.isSuccess }?.records
-                    ?: emptyList()
+                ?: emptyList()
 
-                umRecords.forEach { rec ->
-                    val dl = rec["download"]?.toLongOrNull() ?: 0L
-                    val ul = rec["upload"]?.toLongOrNull() ?: 0L
-                    val total = dl + ul
-                    val isActive = rec["active"].equals("true", ignoreCase = true) ||
-                        rec["status"].equals("start", ignoreCase = true)
-                    val startTime = (rec["from-time"] ?: rec["started"]).orEmpty().ifBlank { "-" }
-                    val endTimeRaw = (rec["till-time"] ?: rec["ended"]).orEmpty()
-                    val endTime = when {
-                        isActive -> "نشط الآن"
-                        endTimeRaw.isNotBlank() -> endTimeRaw
-                        else -> "-"
-                    }
-                    val uptime = rec["uptime"].orEmpty().ifBlank { "0s" }
-                    val ip = (rec["user-ip"] ?: rec["user-address"] ?: rec["framed-ip-address"]).orEmpty().ifBlank { "-" }
-                    val mac = (rec["calling-station-id"] ?: rec["host-ip"]).orEmpty().ifBlank { "-" }
-
-                    sessions.add(
-                        CardSessionEntity(
-                            username = cleanUser,
-                            mikrotikSessionId = rec[".id"].orEmpty(),
-                            startTime = startTime,
-                            endTime = endTime,
-                            uptime = uptime,
-                            downloadBytes = dl,
-                            uploadBytes = ul,
-                            downloadLabel = formatBytesCompact(dl),
-                            uploadLabel = formatBytesCompact(ul),
-                            totalLabel = formatBytesCompact(total),
-                            userIp = ip,
-                            macAddress = mac,
-                            isActive = isActive,
-                            fetchedAt = nowMillis
-                        )
-                    )
-                }
-            }
-
-            // 2. Also inspect live Hotspot active session for this user (fast server-side filter)
-            val activeHotspot = client.execute("/ip/hotspot/active/print", listOf("?user=$cleanUser"))
-                .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
-
-            activeHotspot.forEach { rec ->
-                val ip = rec["address"].orEmpty().ifBlank { "-" }
-                val mac = rec["mac-address"].orEmpty().ifBlank { "-" }
-                val dl = rec["bytes-out"]?.toLongOrNull() ?: 0L
-                val ul = rec["bytes-in"]?.toLongOrNull() ?: 0L
+            umRecords.forEach { rec ->
+                val dl = rec["download"]?.toLongOrNull() ?: 0L
+                val ul = rec["upload"]?.toLongOrNull() ?: 0L
                 val total = dl + ul
-                val uptime = rec["uptime"].orEmpty().ifBlank { "0s" }
-
-                val existingActiveIdx = sessions.indexOfFirst { it.isActive && (it.userIp == ip || it.macAddress == mac || it.userIp == "-") }
-                if (existingActiveIdx >= 0) {
-                    val existing = sessions[existingActiveIdx]
-                    sessions[existingActiveIdx] = existing.copy(
-                        userIp = if (existing.userIp == "-" && ip != "-") ip else existing.userIp,
-                        macAddress = if (existing.macAddress == "-" && mac != "-") mac else existing.macAddress,
-                        uptime = if (uptime != "0s") uptime else existing.uptime,
-                        downloadBytes = maxOf(existing.downloadBytes, dl),
-                        uploadBytes = maxOf(existing.uploadBytes, ul),
-                        downloadLabel = formatBytesCompact(maxOf(existing.downloadBytes, dl)),
-                        uploadLabel = formatBytesCompact(maxOf(existing.uploadBytes, ul)),
-                        totalLabel = formatBytesCompact(maxOf(existing.downloadBytes + existing.uploadBytes, total))
-                    )
-                } else {
-                    sessions.add(
-                        0,
-                        CardSessionEntity(
-                            username = cleanUser,
-                            mikrotikSessionId = rec[".id"].orEmpty(),
-                            startTime = "جلسة هوتسبوت نشطة",
-                            endTime = "نشط الآن",
-                            uptime = uptime,
-                            downloadBytes = dl,
-                            uploadBytes = ul,
-                            downloadLabel = formatBytesCompact(dl),
-                            uploadLabel = formatBytesCompact(ul),
-                            totalLabel = formatBytesCompact(total),
-                            userIp = ip,
-                            macAddress = mac,
-                            isActive = true,
-                            fetchedAt = nowMillis
-                        )
-                    )
+                val isActive = rec["active"].equals("true", ignoreCase = true) ||
+                    rec["status"].equals("start", ignoreCase = true)
+                val startTime = (rec["from-time"] ?: rec["started"]).orEmpty().ifBlank { "-" }
+                val endTimeRaw = (rec["till-time"] ?: rec["ended"]).orEmpty()
+                val endTime = when {
+                    isActive -> "نشط الآن"
+                    endTimeRaw.isNotBlank() -> endTimeRaw
+                    else -> "-"
                 }
+                val uptime = rec["uptime"].orEmpty().ifBlank { "0s" }
+                val ip = (rec["user-ip"] ?: rec["user-address"] ?: rec["framed-ip-address"]).orEmpty().ifBlank { "-" }
+                val mac = (rec["calling-station-id"] ?: rec["host-ip"]).orEmpty().ifBlank { "-" }
+
+                sessions.add(
+                    CardSessionEntity(
+                        username = cleanUser,
+                        mikrotikSessionId = rec[".id"].orEmpty(),
+                        startTime = startTime,
+                        endTime = endTime,
+                        uptime = uptime,
+                        downloadBytes = dl,
+                        uploadBytes = ul,
+                        downloadLabel = formatBytesCompact(dl),
+                        uploadLabel = formatBytesCompact(ul),
+                        totalLabel = formatBytesCompact(total),
+                        userIp = ip,
+                        macAddress = mac,
+                        isActive = isActive,
+                        fetchedAt = nowMillis
+                    )
+                )
             }
 
-            // Sort newest/active first
             val sorted = sessions.sortedWith(
                 compareByDescending<CardSessionEntity> { it.isActive }
                     .thenByDescending { parseMikrotikDateKey(it.startTime) ?: "" }
@@ -281,12 +229,12 @@ object MikrotikSyncManager {
     }
 
     /**
-     * Aggregates real today download & period sales directly from MikroTik active sessions,
-     * User Manager sessions, and User Manager payments (with safe timeout & graceful fallback).
+     * Aggregates real today download & period sales directly from MikroTik User Manager
+     * sessions and payments (RouterOS v6 & v7).
      */
     suspend fun fetchLiveReportsMetrics(
         credentials: MikrotikCredentials,
-        loadType: NetworkLoadType,
+        @Suppress("UNUSED_PARAMETER") loadType: NetworkLoadType,
         cards: List<CardEntity>,
         packages: List<CardPackageEntity>
     ): Result<MikrotikLiveReportsMetrics> = withContext(Dispatchers.IO) {
@@ -295,7 +243,7 @@ object MikrotikSyncManager {
             val loginRes = client.connectAndLogin(credentials)
             if (loginRes.isFailure) {
                 return@withContext Result.failure(
-                    loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بالمايكروتيك")
+                    loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بسيرفر يوزر منجر")
                 )
             }
 
@@ -318,45 +266,42 @@ object MikrotikSyncManager {
                 return inferPriceFromPackageName(card.packageName)
             }
 
-            // 1. Live active connections download bytes (always fast)
             val activeLiveBytes = sysStatus.totalDownloadBytes
 
-            // 2. Query MikroTik User Manager payments if any exist
+            // 1. User Manager payments
             var paymentsCount = 0
             var payTodayAmt = 0.0; var payTodayCnt = 0
             var payYestAmt = 0.0; var payYestCnt = 0
             var payWeekAmt = 0.0; var payWeekCnt = 0
             var payMonthAmt = 0.0; var payMonthCnt = 0
 
-            if (loadType == NetworkLoadType.LOAD_USER_MANAGER || loadType == NetworkLoadType.LOAD_ALL) {
-                val payCmd = if (isV7) "/user-manager/payment/print" else "/tool/user-manager/payment/print"
-                val payments = client.execute(
-                    payCmd,
-                    listOf("=.proplist=user,price,trans-start,date,method")
-                ).getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
+            val payCmd = if (isV7) "/user-manager/payment/print" else "/tool/user-manager/payment/print"
+            val payments = client.execute(
+                payCmd,
+                listOf("=.proplist=user,price,trans-start,date,method")
+            ).getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
 
-                paymentsCount = payments.size
-                payments.forEach { rec ->
-                    val dateKey = parseMikrotikDateKey(rec["trans-start"] ?: rec["date"]) ?: return@forEach
-                    val rawPrice = rec["price"]?.toDoubleOrNull()
-                        ?: rec["price"]?.filter { it.isDigit() || it == '.' }?.toDoubleOrNull()
-                        ?: resolveUserPrice(rec["user"].orEmpty())
-                    if (dateKey == todayKey) {
-                        payTodayAmt += rawPrice; payTodayCnt++
-                    }
-                    if (dateKey == yesterdayKey) {
-                        payYestAmt += rawPrice; payYestCnt++
-                    }
-                    if (dateKey >= weekStartKey) {
-                        payWeekAmt += rawPrice; payWeekCnt++
-                    }
-                    if (dateKey >= monthStartKey) {
-                        payMonthAmt += rawPrice; payMonthCnt++
-                    }
+            paymentsCount = payments.size
+            payments.forEach { rec ->
+                val dateKey = parseMikrotikDateKey(rec["trans-start"] ?: rec["date"]) ?: return@forEach
+                val rawPrice = rec["price"]?.toDoubleOrNull()
+                    ?: rec["price"]?.filter { it.isDigit() || it == '.' }?.toDoubleOrNull()
+                    ?: resolveUserPrice(rec["user"].orEmpty())
+                if (dateKey == todayKey) {
+                    payTodayAmt += rawPrice; payTodayCnt++
+                }
+                if (dateKey == yesterdayKey) {
+                    payYestAmt += rawPrice; payYestCnt++
+                }
+                if (dateKey >= weekStartKey) {
+                    payWeekAmt += rawPrice; payWeekCnt++
+                }
+                if (dateKey >= monthStartKey) {
+                    payMonthAmt += rawPrice; payMonthCnt++
                 }
             }
 
-            // 3. Query User Manager sessions (lightweight proplist) for today's download + period activity
+            // 2. User Manager sessions (lightweight proplist)
             var sessionsScanned = 0
             var todaySessionBytes = 0L
             val earliestSessionDateByUser = HashMap<String, String>()
@@ -365,40 +310,37 @@ object MikrotikSyncManager {
             val weekActiveUsers = HashSet<String>()
             val monthActiveUsers = HashSet<String>()
 
-            if (loadType == NetworkLoadType.LOAD_USER_MANAGER || loadType == NetworkLoadType.LOAD_ALL) {
-                val sessCmd = if (isV7) "/user-manager/session/print" else "/tool/user-manager/session/print"
-                val sessRecords = client.execute(
-                    sessCmd,
-                    listOf("=.proplist=user,from-time,till-time,started,ended,download,upload,active")
-                ).getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
+            val sessCmd = if (isV7) "/user-manager/session/print" else "/tool/user-manager/session/print"
+            val sessRecords = client.execute(
+                sessCmd,
+                listOf("=.proplist=user,from-time,till-time,started,ended,download,upload,active")
+            ).getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
 
-                sessionsScanned = sessRecords.size
-                sessRecords.forEach { rec ->
-                    val user = rec["user"].orEmpty().trim()
-                    val fromKey = parseMikrotikDateKey(rec["from-time"] ?: rec["started"])
-                    val tillKey = parseMikrotikDateKey(rec["till-time"] ?: rec["ended"])
-                    val isActive = rec["active"].equals("true", ignoreCase = true)
-                    val dl = rec["download"]?.toLongOrNull() ?: 0L
-                    val ul = rec["upload"]?.toLongOrNull() ?: 0L
+            sessionsScanned = sessRecords.size
+            sessRecords.forEach { rec ->
+                val user = rec["user"].orEmpty().trim()
+                val fromKey = parseMikrotikDateKey(rec["from-time"] ?: rec["started"])
+                val tillKey = parseMikrotikDateKey(rec["till-time"] ?: rec["ended"])
+                val isActive = rec["active"].equals("true", ignoreCase = true)
+                val dl = rec["download"]?.toLongOrNull() ?: 0L
+                val ul = rec["upload"]?.toLongOrNull() ?: 0L
 
-                    if (isActive || fromKey == todayKey || tillKey == todayKey) {
-                        todaySessionBytes += (dl + ul)
+                if (isActive || fromKey == todayKey || tillKey == todayKey) {
+                    todaySessionBytes += (dl + ul)
+                }
+
+                if (user.isNotBlank() && fromKey != null) {
+                    val prev = earliestSessionDateByUser[user]
+                    if (prev == null || fromKey < prev) {
+                        earliestSessionDateByUser[user] = fromKey
                     }
-
-                    if (user.isNotBlank() && fromKey != null) {
-                        val prev = earliestSessionDateByUser[user]
-                        if (prev == null || fromKey < prev) {
-                            earliestSessionDateByUser[user] = fromKey
-                        }
-                        if (fromKey == todayKey || tillKey == todayKey || isActive) todayActiveUsers.add(user)
-                        if (fromKey == yesterdayKey) yesterdayActiveUsers.add(user)
-                        if (fromKey >= weekStartKey) weekActiveUsers.add(user)
-                        if (fromKey >= monthStartKey) monthActiveUsers.add(user)
-                    }
+                    if (fromKey == todayKey || tillKey == todayKey || isActive) todayActiveUsers.add(user)
+                    if (fromKey == yesterdayKey) yesterdayActiveUsers.add(user)
+                    if (fromKey >= weekStartKey) weekActiveUsers.add(user)
+                    if (fromKey >= monthStartKey) monthActiveUsers.add(user)
                 }
             }
 
-            // First-activation date per card gives true newly-activated cards per period
             fun buildActivationPeriod(predicate: (String) -> Boolean, fallbackUsers: Set<String>): PeriodSalesSummary {
                 val matchedUsers = earliestSessionDateByUser
                     .filterValues(predicate)
@@ -436,10 +378,10 @@ object MikrotikSyncManager {
 
             val todayBytes = maxOf(todaySessionBytes, activeLiveBytes)
             val sourceNote = when {
-                usePayments -> "بيانات حية من مدفوعات وجلسات المايكروتيك ($paymentsCount دفعة • $sessionsScanned جلسة)"
-                sessionsScanned > 0 -> "بيانات حية من جلسات وتفعيل الكروت على المايكروتيك ($sessionsScanned جلسة)"
-                activeLiveBytes > 0L -> "بيانات حية من المتصلين الآن (${sysStatus.activeConnectionsCount} متصل) والكروت المتزامنة"
-                else -> "بيانات الكروت المتزامنة من المايكروتيك"
+                usePayments -> "بيانات حية من مدفوعات وجلسات يوزر منجر ($paymentsCount دفعة • $sessionsScanned جلسة)"
+                sessionsScanned > 0 -> "بيانات حية من جلسات وتفعيل كروت يوزر منجر ($sessionsScanned جلسة)"
+                activeLiveBytes > 0L -> "بيانات حية من جلسات يوزر منجر النشطة (${sysStatus.activeConnectionsCount} متصل)"
+                else -> "بيانات كروت يوزر منجر المتزامنة"
             }
 
             Result.success(
@@ -464,7 +406,7 @@ object MikrotikSyncManager {
 
     suspend fun pushCardsToMikrotik(
         credentials: MikrotikCredentials,
-        loadType: NetworkLoadType,
+        @Suppress("UNUSED_PARAMETER") loadType: NetworkLoadType,
         cards: List<CardEntity>,
         repository: CardPrinterRepository,
         onProgress: (MikrotikPushCardProgress) -> Unit
@@ -477,7 +419,7 @@ object MikrotikSyncManager {
             val loginRes = client.connectAndLogin(credentials)
             if (loginRes.isFailure) {
                 return@withContext Result.failure(
-                    loginRes.exceptionOrNull() ?: IllegalStateException("غير متصل بسيرفر المايكروتيك.")
+                    loginRes.exceptionOrNull() ?: IllegalStateException("غير متصل بسيرفر يوزر منجر.")
                 )
             }
 
@@ -490,10 +432,9 @@ object MikrotikSyncManager {
             var lastRouterError: String? = null
 
             cards.forEachIndexed { idx, card ->
-                val pushRes = pushSingleCardInternal(
+                val pushRes = pushSingleUserManagerCardInternal(
                     client = client,
                     isV7 = isV7,
-                    loadType = loadType,
                     customer = credentials.username,
                     card = card
                 )
@@ -526,7 +467,7 @@ object MikrotikSyncManager {
 
             if (addedCount == 0 && lastRouterError != null) {
                 return@withContext Result.failure(
-                    IllegalStateException("فشل إضافة الكروت إلى المايكروتيك: $lastRouterError")
+                    IllegalStateException("فشل إضافة الكروت إلى يوزر منجر: $lastRouterError")
                 )
             }
 
@@ -540,7 +481,7 @@ object MikrotikSyncManager {
 
     suspend fun deleteCardsOnMikrotik(
         credentials: MikrotikCredentials,
-        loadType: NetworkLoadType,
+        @Suppress("UNUSED_PARAMETER") loadType: NetworkLoadType,
         cards: List<CardEntity>
     ): Result<Int> = withContext(Dispatchers.IO) {
         val client = MikrotikApiClient()
@@ -552,7 +493,7 @@ object MikrotikSyncManager {
 
             var removed = 0
             for (card in cards) {
-                val ok = deleteSingleCardInternal(client, isV7, loadType, card)
+                val ok = deleteSingleUserManagerCardInternal(client, isV7, card)
                 if (ok) removed++
             }
             Result.success(removed)
@@ -571,31 +512,32 @@ object MikrotikSyncManager {
         val version = resMap["version"].orEmpty()
         val board = resMap["board-name"].orEmpty()
 
-        // Active Hotspot connections + live bytes
-        val activeHotspot = client.execute(
-            "/ip/hotspot/active/print",
-            listOf("=.proplist=user,bytes-in,bytes-out")
-        ).getOrNull()?.records.orEmpty()
-        var activeCount = activeHotspot.size
-        var totalBytes = activeHotspot.sumOf { rec ->
-            (rec["bytes-in"]?.toLongOrNull() ?: 0L) + (rec["bytes-out"]?.toLongOrNull() ?: 0L)
+        // Query User Manager active sessions first
+        val umActiveCmd = if (version.trim().startsWith("7")) {
+            "/user-manager/session/print"
+        } else {
+            "/tool/user-manager/session/print"
+        }
+        val umSessions = client.execute(
+            umActiveCmd,
+            listOf("?active=true", "=.proplist=download,upload")
+        ).getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
+
+        var activeCount = umSessions.size
+        var totalBytes = umSessions.sumOf { rec ->
+            (rec["download"]?.toLongOrNull() ?: 0L) + (rec["upload"]?.toLongOrNull() ?: 0L)
         }
 
-        // If Hotspot active list is empty, inspect User Manager active sessions
+        // Fallback to router active RADIUS/accounting sessions only for the live counter gauge if UM active list returns 0
         if (activeCount == 0) {
-            val umActiveCmd = if (version.trim().startsWith("7")) {
-                "/user-manager/session/print"
-            } else {
-                "/tool/user-manager/session/print"
-            }
-            val umSessions = client.execute(
-                umActiveCmd,
-                listOf("?active=true", "=.proplist=download,upload")
+            val activeSessions = client.execute(
+                "/ip/hotspot/active/print",
+                listOf("=.proplist=user,bytes-in,bytes-out")
             ).getOrNull()?.records.orEmpty()
-            if (umSessions.isNotEmpty()) {
-                activeCount = umSessions.size
-                totalBytes = umSessions.sumOf { rec ->
-                    (rec["download"]?.toLongOrNull() ?: 0L) + (rec["upload"]?.toLongOrNull() ?: 0L)
+            if (activeSessions.isNotEmpty()) {
+                activeCount = activeSessions.size
+                totalBytes = activeSessions.sumOf { rec ->
+                    (rec["bytes-in"]?.toLongOrNull() ?: 0L) + (rec["bytes-out"]?.toLongOrNull() ?: 0L)
                 }
             }
         }
@@ -611,179 +553,76 @@ object MikrotikSyncManager {
         )
     }
 
-    private suspend fun fetchPackagesInternal(
+    private suspend fun fetchUserManagerPackagesInternal(
         client: MikrotikApiClient,
-        isV7: Boolean,
-        loadType: NetworkLoadType
+        isV7: Boolean
     ): List<CardPackageEntity> {
         val result = LinkedHashMap<String, CardPackageEntity>()
+        val primaryCmd = if (isV7) "/user-manager/profile/print" else "/tool/user-manager/profile/print"
+        val fallbackCmd = if (isV7) "/tool/user-manager/profile/print" else "/user-manager/profile/print"
+        val records = client.execute(primaryCmd).getOrNull()?.takeIf { it.isSuccess }?.records
+            ?: client.execute(fallbackCmd).getOrNull()?.takeIf { it.isSuccess }?.records
+            ?: emptyList()
 
-        if (loadType == NetworkLoadType.LOAD_USER_MANAGER || loadType == NetworkLoadType.LOAD_ALL) {
-            val primaryCmd = if (isV7) "/user-manager/profile/print" else "/tool/user-manager/profile/print"
-            val fallbackCmd = if (isV7) "/tool/user-manager/profile/print" else "/user-manager/profile/print"
-            val records = client.execute(primaryCmd).getOrNull()?.takeIf { it.isSuccess }?.records
-                ?: client.execute(fallbackCmd).getOrNull()?.takeIf { it.isSuccess }?.records
-                ?: emptyList()
-
-            records.forEach { r ->
-                val name = r["name"].orEmpty().trim()
-                if (name.isNotBlank()) {
-                    val routerPrice = r["price"]?.toDoubleOrNull()
-                        ?: r["price"]?.filter { it.isDigit() || it == '.' }?.toDoubleOrNull()
-                        ?: 0.0
-                    val price = if (routerPrice > 0.0) routerPrice else inferPriceFromPackageName(name)
-                    val validity = r["validity"].orEmpty()
-                    result[name] = CardPackageEntity(
-                        name = name,
-                        price = price,
-                        commission = 0.0,
-                        validityLabel = validity,
-                        dataLimitMb = 0.0
-                    )
-                }
+        records.forEach { r ->
+            val name = r["name"].orEmpty().trim()
+            if (name.isNotBlank()) {
+                val routerPrice = r["price"]?.toDoubleOrNull()
+                    ?: r["price"]?.filter { it.isDigit() || it == '.' }?.toDoubleOrNull()
+                    ?: 0.0
+                val price = if (routerPrice > 0.0) routerPrice else inferPriceFromPackageName(name)
+                val validity = r["validity"].orEmpty()
+                result[name] = CardPackageEntity(
+                    name = name,
+                    price = price,
+                    commission = 0.0,
+                    validityLabel = validity,
+                    dataLimitMb = 0.0
+                )
             }
         }
-
-        if (loadType == NetworkLoadType.LOAD_HOTSPOT || loadType == NetworkLoadType.LOAD_ALL) {
-            val hsProfiles = client.execute("/ip/hotspot/user/profile/print")
-                .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
-            hsProfiles.forEach { r ->
-                val name = r["name"].orEmpty().trim()
-                if (name.isNotBlank() && !result.containsKey(name)) {
-                    result[name] = CardPackageEntity(
-                        name = name,
-                        price = inferPriceFromPackageName(name),
-                        commission = 0.0,
-                        validityLabel = r["session-timeout"].orEmpty(),
-                        dataLimitMb = 0.0
-                    )
-                }
-            }
-        }
-
         return result.values.toList()
     }
 
-    private suspend fun fetchCardsInternal(
+    private suspend fun fetchUserManagerCardsInternal(
         client: MikrotikApiClient,
         isV7: Boolean,
-        loadType: NetworkLoadType,
         serverAccount: String,
         priceByPackage: Map<String, Double>
     ): List<CardEntity> {
         val result = LinkedHashMap<String, CardEntity>()
 
-        if (loadType == NetworkLoadType.LOAD_USER_MANAGER || loadType == NetworkLoadType.LOAD_ALL) {
-            if (isV7) {
-                val users = client.execute("/user-manager/user/print")
-                    .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
-                val userProfiles = client.execute("/user-manager/user-profile/print")
-                    .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
-                val sessions = client.execute(
-                    "/user-manager/session/print",
-                    listOf("=.proplist=user,download,upload,uptime")
-                ).getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
-
-                val profileMap = userProfiles.groupBy { it["user"].orEmpty() }
-                val sessionMap = sessions.groupBy { it["user"].orEmpty() }
-
-                users.forEach { u ->
-                    val uname = u["name"].orEmpty().trim()
-                    if (uname.isBlank()) return@forEach
-                    val upList = profileMap[uname].orEmpty()
-                    val latestProfile = upList.lastOrNull()
-                    val pkgName = latestProfile?.get("profile").orEmpty().ifBlank { u["group"].orEmpty() }
-                    val userSessions = sessionMap[uname].orEmpty()
-                    val totalBytes = userSessions.sumOf {
-                        (it["download"]?.toLongOrNull() ?: 0L) + (it["upload"]?.toLongOrNull() ?: 0L)
-                    }
-                    val totalMb = totalBytes / (1024.0 * 1024.0)
-                    val uptimeLabel = userSessions.lastOrNull()?.get("uptime").orEmpty().ifBlank { "0m" }
-                    val stateStr = latestProfile?.get("state").orEmpty().lowercase()
-                    val disabled = u["disabled"] == "true"
-
-                    val status = when {
-                        disabled || stateStr.contains("used") || stateStr.contains("expired") || stateStr.contains("end") -> CardStatus.EXPIRED
-                        userSessions.isNotEmpty() || stateStr.contains("running") || stateStr.contains("active") -> CardStatus.USED
-                        else -> CardStatus.UNUSED
-                    }
-
-                    val resolvedPrice = priceByPackage[pkgName.lowercase()]
-                        ?.takeIf { it > 0.0 }
-                        ?: inferPriceFromPackageName(pkgName)
-
-                    result[uname] = CardEntity(
-                        username = uname,
-                        password = u["password"].orEmpty(),
-                        packageName = pkgName,
-                        price = resolvedPrice,
-                        serverAccount = serverAccount,
-                        mikrotikId = u[".id"],
-                        status = status,
-                        uptimeLabel = uptimeLabel,
-                        dataUsageLabel = formatBytesCompact(totalBytes),
-                        dataUsageMb = totalMb
-                    )
-                }
-            } else {
-                // RouterOS v6 User Manager
-                val users = client.execute("/tool/user-manager/user/print")
-                    .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
-                users.forEach { u ->
-                    val uname = (u["username"] ?: u["name"]).orEmpty().trim()
-                    if (uname.isBlank()) return@forEach
-                    val pkgName = u["actual-profile"].orEmpty()
-                    val dlBytes = (u["download-used"]?.toLongOrNull() ?: 0L) + (u["upload-used"]?.toLongOrNull() ?: 0L)
-                    val uptimeUsed = u["uptime-used"].orEmpty().ifBlank { "0m" }
-                    val disabled = u["disabled"] == "true"
-                    val isActive = u["active"] == "true"
-                    val hasUsage = dlBytes > 0L || (uptimeUsed != "0m" && uptimeUsed != "0s" && uptimeUsed.isNotBlank())
-
-                    val status = when {
-                        disabled -> CardStatus.EXPIRED
-                        isActive || (hasUsage && pkgName.isNotBlank()) -> CardStatus.USED
-                        hasUsage && pkgName.isBlank() -> CardStatus.EXPIRED
-                        else -> CardStatus.UNUSED
-                    }
-
-                    val resolvedPrice = priceByPackage[pkgName.lowercase()]
-                        ?.takeIf { it > 0.0 }
-                        ?: inferPriceFromPackageName(pkgName)
-
-                    result[uname] = CardEntity(
-                        username = uname,
-                        password = u["password"].orEmpty(),
-                        packageName = pkgName,
-                        price = resolvedPrice,
-                        serverAccount = u["customer"].orEmpty().ifBlank { serverAccount },
-                        mikrotikId = u[".id"],
-                        status = status,
-                        uptimeLabel = uptimeUsed,
-                        dataUsageLabel = formatBytesCompact(dlBytes),
-                        dataUsageMb = dlBytes / (1024.0 * 1024.0)
-                    )
-                }
-            }
-        }
-
-        if (loadType == NetworkLoadType.LOAD_HOTSPOT || loadType == NetworkLoadType.LOAD_ALL) {
-            val hsUsers = client.execute("/ip/hotspot/user/print")
+        if (isV7) {
+            val users = client.execute("/user-manager/user/print")
                 .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
-            hsUsers.forEach { u ->
-                val uname = u["name"].orEmpty().trim()
-                if (uname.isBlank() || uname.equals("default-trial", ignoreCase = true)) return@forEach
-                if (result.containsKey(uname)) return@forEach
+            val userProfiles = client.execute("/user-manager/user-profile/print")
+                .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
+            val sessions = client.execute(
+                "/user-manager/session/print",
+                listOf("=.proplist=user,download,upload,uptime")
+            ).getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
 
-                val pkgName = u["profile"].orEmpty()
-                val bytesTotal = (u["bytes-in"]?.toLongOrNull() ?: 0L) + (u["bytes-out"]?.toLongOrNull() ?: 0L)
-                val limitBytes = u["limit-bytes-total"]?.toLongOrNull() ?: 0L
-                val uptime = u["uptime"].orEmpty().ifBlank { "0s" }
+            val profileMap = userProfiles.groupBy { it["user"].orEmpty() }
+            val sessionMap = sessions.groupBy { it["user"].orEmpty() }
+
+            users.forEach { u ->
+                val uname = u["name"].orEmpty().trim()
+                if (uname.isBlank()) return@forEach
+                val upList = profileMap[uname].orEmpty()
+                val latestProfile = upList.lastOrNull()
+                val pkgName = latestProfile?.get("profile").orEmpty().ifBlank { u["group"].orEmpty() }
+                val userSessions = sessionMap[uname].orEmpty()
+                val totalBytes = userSessions.sumOf {
+                    (it["download"]?.toLongOrNull() ?: 0L) + (it["upload"]?.toLongOrNull() ?: 0L)
+                }
+                val totalMb = totalBytes / (1024.0 * 1024.0)
+                val uptimeLabel = userSessions.lastOrNull()?.get("uptime").orEmpty().ifBlank { "0m" }
+                val stateStr = latestProfile?.get("state").orEmpty().lowercase()
                 val disabled = u["disabled"] == "true"
-                val quotaExhausted = limitBytes > 0L && bytesTotal >= limitBytes
 
                 val status = when {
-                    disabled || quotaExhausted -> CardStatus.EXPIRED
-                    bytesTotal > 0L || (uptime != "0s" && uptime != "0m") -> CardStatus.USED
+                    disabled || stateStr.contains("used") || stateStr.contains("expired") || stateStr.contains("end") -> CardStatus.EXPIRED
+                    userSessions.isNotEmpty() || stateStr.contains("running") || stateStr.contains("active") -> CardStatus.USED
                     else -> CardStatus.UNUSED
                 }
 
@@ -799,9 +638,47 @@ object MikrotikSyncManager {
                     serverAccount = serverAccount,
                     mikrotikId = u[".id"],
                     status = status,
-                    uptimeLabel = uptime,
-                    dataUsageLabel = formatBytesCompact(bytesTotal),
-                    dataUsageMb = bytesTotal / (1024.0 * 1024.0)
+                    uptimeLabel = uptimeLabel,
+                    dataUsageLabel = formatBytesCompact(totalBytes),
+                    dataUsageMb = totalMb
+                )
+            }
+        } else {
+            // RouterOS v6 User Manager
+            val users = client.execute("/tool/user-manager/user/print")
+                .getOrNull()?.takeIf { it.isSuccess }?.records.orEmpty()
+            users.forEach { u ->
+                val uname = (u["username"] ?: u["name"]).orEmpty().trim()
+                if (uname.isBlank()) return@forEach
+                val pkgName = u["actual-profile"].orEmpty()
+                val dlBytes = (u["download-used"]?.toLongOrNull() ?: 0L) + (u["upload-used"]?.toLongOrNull() ?: 0L)
+                val uptimeUsed = u["uptime-used"].orEmpty().ifBlank { "0m" }
+                val disabled = u["disabled"] == "true"
+                val isActive = u["active"] == "true"
+                val hasUsage = dlBytes > 0L || (uptimeUsed != "0m" && uptimeUsed != "0s" && uptimeUsed.isNotBlank())
+
+                val status = when {
+                    disabled -> CardStatus.EXPIRED
+                    isActive || (hasUsage && pkgName.isNotBlank()) -> CardStatus.USED
+                    hasUsage && pkgName.isBlank() -> CardStatus.EXPIRED
+                    else -> CardStatus.UNUSED
+                }
+
+                val resolvedPrice = priceByPackage[pkgName.lowercase()]
+                    ?.takeIf { it > 0.0 }
+                    ?: inferPriceFromPackageName(pkgName)
+
+                result[uname] = CardEntity(
+                    username = uname,
+                    password = u["password"].orEmpty(),
+                    packageName = pkgName,
+                    price = resolvedPrice,
+                    serverAccount = u["customer"].orEmpty().ifBlank { serverAccount },
+                    mikrotikId = u[".id"],
+                    status = status,
+                    uptimeLabel = uptimeUsed,
+                    dataUsageLabel = formatBytesCompact(dlBytes),
+                    dataUsageMb = dlBytes / (1024.0 * 1024.0)
                 )
             }
         }
@@ -809,26 +686,12 @@ object MikrotikSyncManager {
         return result.values.toList()
     }
 
-    private suspend fun pushSingleCardInternal(
+    private suspend fun pushSingleUserManagerCardInternal(
         client: MikrotikApiClient,
         isV7: Boolean,
-        loadType: NetworkLoadType,
         customer: String,
         card: CardEntity
     ): Result<String?> {
-        if (loadType == NetworkLoadType.LOAD_HOTSPOT) {
-            val params = mutableListOf(
-                "=name=${card.username}",
-                "=password=${card.password}",
-                "=comment=alkamel:${card.packageName}"
-            )
-            if (card.packageName.isNotBlank()) params.add("=profile=${card.packageName}")
-            val res = client.execute("/ip/hotspot/user/add", params)
-            val cmdRes = res.getOrElse { return Result.failure(it) }
-            return if (cmdRes.isSuccess) Result.success(cmdRes.doneAttributes["ret"])
-            else Result.failure(IllegalStateException(cmdRes.trapMessage ?: "فشل إضافة كرت هوتسبوت"))
-        }
-
         return if (isV7) {
             val addParams = mutableListOf(
                 "=name=${card.username}",
@@ -838,7 +701,7 @@ object MikrotikSyncManager {
             )
             val userAdd = client.execute("/user-manager/user/add", addParams).getOrElse { return Result.failure(it) }
             if (!userAdd.isSuccess) {
-                return Result.failure(IllegalStateException(userAdd.trapMessage ?: "فشل إضافة المستخدم"))
+                return Result.failure(IllegalStateException(userAdd.trapMessage ?: "فشل إضافة المستخدم في يوزر منجر"))
             }
             if (card.packageName.isNotBlank()) {
                 client.execute(
@@ -858,7 +721,7 @@ object MikrotikSyncManager {
             )
             val userAdd = client.execute("/tool/user-manager/user/add", addParams).getOrElse { return Result.failure(it) }
             if (!userAdd.isSuccess) {
-                return Result.failure(IllegalStateException(userAdd.trapMessage ?: "فشل إضافة الكرت في يوزر مانجر"))
+                return Result.failure(IllegalStateException(userAdd.trapMessage ?: "فشل إضافة الكرت في يوزر منجر"))
             }
             val createdId = userAdd.doneAttributes["ret"]
             if (card.packageName.isNotBlank()) {
@@ -876,19 +739,14 @@ object MikrotikSyncManager {
         }
     }
 
-    private suspend fun deleteSingleCardInternal(
+    private suspend fun deleteSingleUserManagerCardInternal(
         client: MikrotikApiClient,
         isV7: Boolean,
-        loadType: NetworkLoadType,
         card: CardEntity
     ): Boolean {
-        val basePath = when {
-            loadType == NetworkLoadType.LOAD_HOTSPOT -> "/ip/hotspot/user"
-            isV7 -> "/user-manager/user"
-            else -> "/tool/user-manager/user"
-        }
+        val basePath = if (isV7) "/user-manager/user" else "/tool/user-manager/user"
         val targetId = card.mikrotikId?.takeIf { it.isNotBlank() } ?: run {
-            val queryKey = if (!isV7 && loadType != NetworkLoadType.LOAD_HOTSPOT) "?username=${card.username}" else "?name=${card.username}"
+            val queryKey = if (!isV7) "?username=${card.username}" else "?name=${card.username}"
             client.execute("$basePath/print", listOf(queryKey))
                 .getOrNull()?.records?.firstOrNull()?.get(".id")
         } ?: return false
@@ -897,18 +755,12 @@ object MikrotikSyncManager {
         return removeRes?.isSuccess == true
     }
 
-    /**
-     * Parses RouterOS v6 ("nov/21/2026 14:22:01") and RouterOS v7 ("2026-11-21 14:22:01")
-     * timestamps into standard SQL date key "yyyy-MM-dd".
-     */
     fun parseMikrotikDateKey(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         val token = raw.trim().substringBefore(' ')
-        // ISO format: 2026-11-21
         if (token.length >= 10 && token[4] == '-' && token[7] == '-') {
             return token.substring(0, 10)
         }
-        // RouterOS v6 format: nov/21/2026
         val parts = token.split('/')
         if (parts.size == 3) {
             val monthNum = MONTH_ABBR_TO_NUM[parts[0].lowercase(Locale.US)] ?: return null

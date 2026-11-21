@@ -74,7 +74,7 @@ fun PackagesScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             AlkamelTopHeader(
-                title = "إدارة الباقات (${state.packages.size})",
+                title = "باقات يوزر منجر (${state.packages.size})",
                 onNavigateBack = onNavigateBack
             )
         },
@@ -98,7 +98,7 @@ fun PackagesScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "لا توجد باقات حالياً.\nقم بالربط بسيرفر المايكروتيك ومزامنة الباقات تلقائياً أو أضف باقة مطابقة لاسم الـ Profile في المايكروتيك عبر زر (+).",
+                    text = "لا توجد باقات يوزر منجر حالياً.\nقم بالربط بسيرفر يوزر منجر ومزامنة الباقات تلقائياً أو أضف باقة مطابقة لاسم الـ Profile في يوزر منجر عبر زر (+).",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -192,7 +192,7 @@ fun PackagesScreen(
                     OutlinedTextField(
                         value = state.nameInput,
                         onValueChange = viewModel::onNameChange,
-                        label = { Text("اسم الباقة (Profile في المايكروتيك)") },
+                        label = { Text("اسم باقة يوزر منجر (Profile)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )

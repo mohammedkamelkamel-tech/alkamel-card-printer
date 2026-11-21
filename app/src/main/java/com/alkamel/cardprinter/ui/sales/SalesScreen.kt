@@ -57,7 +57,7 @@ fun SalesScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             AlkamelTopHeader(
-                title = "المبيعات",
+                title = "مبيعات يوزر منجر",
                 onNavigateBack = onNavigateBack
             )
         }

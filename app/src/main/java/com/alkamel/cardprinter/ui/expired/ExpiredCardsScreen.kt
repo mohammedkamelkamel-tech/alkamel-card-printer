@@ -77,7 +77,7 @@ fun ExpiredCardsScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             AlkamelTopHeader(
-                title = "الكروت المنتهية (${state.filteredExpired.size})",
+                title = "كروت يوزر منجر المنتهية (${state.filteredExpired.size})",
                 onNavigateBack = onNavigateBack
             )
         }

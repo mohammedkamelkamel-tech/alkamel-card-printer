@@ -192,7 +192,7 @@ class CardGenerationViewModel(
 
             val pushResult = MikrotikSyncManager.pushCardsToMikrotik(
                 credentials = session.toCredentials(),
-                loadType = session.loadType,
+                loadType = com.alkamel.cardprinter.data.local.model.NetworkLoadType.LOAD_USER_MANAGER,
                 cards = cardsToPush,
                 repository = repository,
                 onProgress = { prog ->
@@ -220,11 +220,11 @@ class CardGenerationViewModel(
                         additionCompleted = true,
                         additionProgressPercent = 100,
                         addedCardsCount = pushed.size,
-                        statusMessage = "تمت إضافة ${pushed.size} من أصل $total كرت فعلياً إلى المايكروتيك بنجاح."
+                        statusMessage = "تمت إضافة ${pushed.size} من أصل $total كرت فعلياً إلى يوزر منجر بنجاح."
                     )
                 }
             }.onFailure { err ->
-                val msg = err.localizedMessage ?: "فشل إرسال الكروت إلى سيرفر المايكروتيك."
+                val msg = err.localizedMessage ?: "فشل إرسال الكروت إلى سيرفر يوزر منجر."
                 _uiState.update {
                     it.copy(
                         isAddingToServer = false,

@@ -43,6 +43,11 @@ class LoginViewModel(
                     val shouldPrefill = current.savedNetworks.isEmpty() && networks.isNotEmpty()
                     val defaultNet = networks.firstOrNull { it.isDefault } ?: networks.firstOrNull()
                     if (shouldPrefill && defaultNet != null) {
+                        val normalizedLoad = if (defaultNet.loadType == NetworkLoadType.NO_LOAD) {
+                            NetworkLoadType.NO_LOAD
+                        } else {
+                            NetworkLoadType.LOAD_USER_MANAGER
+                        }
                         current.copy(
                             savedNetworks = networks,
                             networkName = defaultNet.networkName,
@@ -50,7 +55,7 @@ class LoginViewModel(
                             port = defaultNet.port.toString(),
                             username = defaultNet.username,
                             password = defaultNet.password,
-                            selectedLoadType = defaultNet.loadType
+                            selectedLoadType = normalizedLoad
                         )
                     } else {
                         current.copy(savedNetworks = networks)
@@ -70,6 +75,11 @@ class LoginViewModel(
     fun clearMessages() = _uiState.update { it.copy(errorMessage = null, statusMessage = null) }
 
     fun selectSavedNetwork(network: SavedNetworkEntity) {
+        val normalizedLoad = if (network.loadType == NetworkLoadType.NO_LOAD) {
+            NetworkLoadType.NO_LOAD
+        } else {
+            NetworkLoadType.LOAD_USER_MANAGER
+        }
         _uiState.update {
             it.copy(
                 networkName = network.networkName,
@@ -77,7 +87,7 @@ class LoginViewModel(
                 port = network.port.toString(),
                 username = network.username,
                 password = network.password,
-                selectedLoadType = network.loadType,
+                selectedLoadType = normalizedLoad,
                 showSavedNetworksSheet = false,
                 errorMessage = null,
                 statusMessage = "تم اختيار الشبكة: ${network.networkName}"

@@ -1,11 +1,19 @@
 package com.alkamel.cardprinter.ui.designer
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
+import com.alkamel.cardprinter.data.printing.CardBitmapRenderer
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
 import com.alkamel.cardprinter.ui.components.DesignerElement
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +26,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.floor
+import kotlin.math.roundToInt
 
 data class CardDesignerUiState(
     val templates: List<CardTemplateEntity> = emptyList(),
@@ -27,6 +37,10 @@ data class CardDesignerUiState(
     val heightInput: String = "61",
     val columnsInput: String = "4",
     val rowsInput: String = "25",
+    val cardsPerA4Page: Int = 100,
+    val showA4PreviewDialog: Boolean = false,
+    val a4PreviewBitmap: Bitmap? = null,
+    val isRenderingA4Preview: Boolean = false,
     val selectedElement: DesignerElement = DesignerElement.USERNAME,
     val statusMessage: String? = null,
     val errorMessage: String? = null
@@ -35,6 +49,13 @@ data class CardDesignerUiState(
 class CardDesignerViewModel(
     private val repository: CardPrinterRepository
 ) : ViewModel() {
+
+    companion object {
+        // Printable A4 reference area calibrated so default 203x61 fits 4 cols x 25 rows = 100 cards
+        private const val A4_PRINTABLE_REF_W = 832f
+        private const val A4_PRINTABLE_REF_H = 1625f
+        private const val A4_CARD_GAP = 4f
+    }
 
     private val _uiState = MutableStateFlow(CardDesignerUiState())
     val uiState: StateFlow<CardDesignerUiState> = _uiState.asStateFlow()
@@ -58,7 +79,8 @@ class CardDesignerViewModel(
                             widthInput = def.cardWidth.toInt().toString(),
                             heightInput = def.cardHeight.toInt().toString(),
                             columnsInput = def.columnsPerPage.toString(),
-                            rowsInput = def.rowsPerPage.toString()
+                            rowsInput = def.rowsPerPage.toString(),
+                            cardsPerA4Page = def.columnsPerPage * def.rowsPerPage
                         )
                     } else {
                         current.copy(templates = templates, packages = packages)
@@ -75,7 +97,8 @@ class CardDesignerViewModel(
                 widthInput = template.cardWidth.toInt().toString(),
                 heightInput = template.cardHeight.toInt().toString(),
                 columnsInput = template.columnsPerPage.toString(),
-                rowsInput = template.rowsPerPage.toString()
+                rowsInput = template.rowsPerPage.toString(),
+                cardsPerA4Page = template.columnsPerPage * template.rowsPerPage
             )
         }
     }
@@ -83,7 +106,7 @@ class CardDesignerViewModel(
     fun createNewBlankTemplate() {
         val fresh = CardTemplateEntity(
             id = 0L,
-            name = "قالب جديد ${_uiState.value.templates.size + 1}",
+            name = "قالب يوزر منجر ${_uiState.value.templates.size + 1}",
             packageName = "الكل",
             cardWidth = 203f,
             cardHeight = 61f,
@@ -98,48 +121,112 @@ class CardDesignerViewModel(
     fun onSelectedElementChange(element: DesignerElement) = _uiState.update { it.copy(selectedElement = element) }
     fun clearMessages() = _uiState.update { it.copy(statusMessage = null, errorMessage = null) }
 
+    /**
+     * Automatically recalculates fitting columns & total cards per A4 page immediately
+     * whenever the user changes card width.
+     */
     fun onWidthChange(value: String) {
         val filtered = value.filter { it.isDigit() }.take(4)
         val parsed = filtered.toFloatOrNull()?.coerceIn(60f, 500f)
-        _uiState.update {
-            it.copy(
-                widthInput = filtered,
-                activeTemplate = if (parsed != null) it.activeTemplate.copy(cardWidth = parsed) else it.activeTemplate
-            )
+        _uiState.update { current ->
+            if (parsed == null) {
+                current.copy(widthInput = filtered)
+            } else {
+                val autoCols = calculateFittingColumns(parsed)
+                val rows = current.activeTemplate.rowsPerPage.coerceIn(1, 30)
+                val updatedTpl = current.activeTemplate.copy(
+                    cardWidth = parsed,
+                    columnsPerPage = autoCols
+                )
+                current.copy(
+                    widthInput = filtered,
+                    columnsInput = autoCols.toString(),
+                    activeTemplate = updatedTpl,
+                    cardsPerA4Page = autoCols * rows
+                )
+            }
         }
     }
 
+    /**
+     * Automatically recalculates fitting rows & total cards per A4 page immediately
+     * whenever the user changes card height.
+     */
     fun onHeightChange(value: String) {
         val filtered = value.filter { it.isDigit() }.take(4)
         val parsed = filtered.toFloatOrNull()?.coerceIn(30f, 300f)
-        _uiState.update {
-            it.copy(
-                heightInput = filtered,
-                activeTemplate = if (parsed != null) it.activeTemplate.copy(cardHeight = parsed) else it.activeTemplate
-            )
+        _uiState.update { current ->
+            if (parsed == null) {
+                current.copy(heightInput = filtered)
+            } else {
+                val cols = current.activeTemplate.columnsPerPage.coerceIn(1, 6)
+                val autoRows = calculateFittingRows(parsed)
+                val updatedTpl = current.activeTemplate.copy(
+                    cardHeight = parsed,
+                    rowsPerPage = autoRows
+                )
+                current.copy(
+                    heightInput = filtered,
+                    rowsInput = autoRows.toString(),
+                    activeTemplate = updatedTpl,
+                    cardsPerA4Page = cols * autoRows
+                )
+            }
         }
     }
 
     fun onColumnsChange(value: String) {
         val filtered = value.filter { it.isDigit() }.take(1)
         val parsed = filtered.toIntOrNull()?.coerceIn(1, 6)
-        _uiState.update {
-            it.copy(
-                columnsInput = filtered,
-                activeTemplate = if (parsed != null) it.activeTemplate.copy(columnsPerPage = parsed) else it.activeTemplate
-            )
+        _uiState.update { current ->
+            if (parsed == null) {
+                current.copy(columnsInput = filtered)
+            } else {
+                val updatedTpl = current.activeTemplate.copy(columnsPerPage = parsed)
+                current.copy(
+                    columnsInput = filtered,
+                    activeTemplate = updatedTpl,
+                    cardsPerA4Page = parsed * updatedTpl.rowsPerPage
+                )
+            }
         }
     }
 
     fun onRowsChange(value: String) {
         val filtered = value.filter { it.isDigit() }.take(2)
         val parsed = filtered.toIntOrNull()?.coerceIn(1, 30)
-        _uiState.update {
-            it.copy(
-                rowsInput = filtered,
-                activeTemplate = if (parsed != null) it.activeTemplate.copy(rowsPerPage = parsed) else it.activeTemplate
-            )
+        _uiState.update { current ->
+            if (parsed == null) {
+                current.copy(rowsInput = filtered)
+            } else {
+                val updatedTpl = current.activeTemplate.copy(rowsPerPage = parsed)
+                current.copy(
+                    rowsInput = filtered,
+                    activeTemplate = updatedTpl,
+                    cardsPerA4Page = updatedTpl.columnsPerPage * parsed
+                )
+            }
         }
+    }
+
+    fun openFullA4Preview() {
+        val tpl = _uiState.value.activeTemplate
+        _uiState.update { it.copy(showA4PreviewDialog = true, isRenderingA4Preview = true) }
+        viewModelScope.launch {
+            val rendered = withContext(Dispatchers.Default) {
+                renderFullA4PageBitmap(tpl)
+            }
+            _uiState.update {
+                it.copy(
+                    a4PreviewBitmap = rendered,
+                    isRenderingA4Preview = false
+                )
+            }
+        }
+    }
+
+    fun closeFullA4Preview() {
+        _uiState.update { it.copy(showA4PreviewDialog = false) }
     }
 
     fun onToggleShowUsername(show: Boolean) = updateTemplate { it.copy(showUsername = show) }
@@ -235,7 +322,92 @@ class CardDesignerViewModel(
         }
     }
 
+    private fun calculateFittingColumns(cardWidth: Float): Int {
+        return floor((A4_PRINTABLE_REF_W + A4_CARD_GAP) / (cardWidth + A4_CARD_GAP))
+            .toInt()
+            .coerceIn(1, 6)
+    }
+
+    private fun calculateFittingRows(cardHeight: Float): Int {
+        return floor((A4_PRINTABLE_REF_H + A4_CARD_GAP) / (cardHeight + A4_CARD_GAP))
+            .toInt()
+            .coerceIn(1, 30)
+    }
+
+    private fun renderFullA4PageBitmap(template: CardTemplateEntity): Bitmap {
+        val pageW = 900
+        val pageH = 1273 // ISO A4 ratio 210:297
+        val margin = 24f
+        val headerH = 38f
+        val gap = 3f
+
+        val cols = template.columnsPerPage.coerceIn(1, 6)
+        val rows = template.rowsPerPage.coerceIn(1, 30)
+        val perPage = cols * rows
+
+        val cellW = (pageW - margin * 2 - gap * (cols - 1)) / cols
+        val ratio = template.cardHeight.coerceAtLeast(20f) / template.cardWidth.coerceAtLeast(40f)
+        val maxRowH = (pageH - margin * 2 - headerH - gap * (rows - 1)) / rows
+        val cellH = minOf(cellW * ratio, maxRowH)
+
+        val pageBmp = Bitmap.createBitmap(pageW, pageH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(pageBmp)
+        canvas.drawColor(Color.WHITE)
+
+        val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#0F172A")
+            textSize = 17f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            textAlign = Paint.Align.RIGHT
+        }
+        val metaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#475569")
+            textSize = 14f
+            textAlign = Paint.Align.LEFT
+        }
+        val cutPaint = Paint().apply {
+            color = Color.parseColor("#94A3B8")
+            style = Paint.Style.STROKE
+            strokeWidth = 1f
+        }
+
+        canvas.drawText("${template.name} • يوزر منجر ($perPage كرت/صفحة)", pageW - margin, margin + 18f, headerPaint)
+        canvas.drawText("A4 • $cols×$rows", margin, margin + 18f, metaPaint)
+
+        val sampleCard = CardEntity(
+            username = "15650109767",
+            password = "4821",
+            packageName = template.packageName
+        )
+        val cardBmp = CardBitmapRenderer.renderCardBitmap(
+            card = sampleCard,
+            template = template,
+            widthPx = cellW.roundToInt().coerceAtLeast(140),
+            heightPx = cellH.roundToInt().coerceAtLeast(42)
+        )
+        val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                val colRtl = (cols - 1) - c
+                val left = margin + colRtl * (cellW + gap)
+                val top = margin + headerH + r * (cellH + gap)
+                val dest = RectF(left, top, left + cellW, top + cellH)
+                canvas.drawBitmap(cardBmp, null, dest, bmpPaint)
+                canvas.drawRect(dest, cutPaint)
+            }
+        }
+        cardBmp.recycle()
+        return pageBmp
+    }
+
     private fun updateTemplate(transform: (CardTemplateEntity) -> CardTemplateEntity) {
-        _uiState.update { it.copy(activeTemplate = transform(it.activeTemplate)) }
+        _uiState.update {
+            val next = transform(it.activeTemplate)
+            it.copy(
+                activeTemplate = next,
+                cardsPerA4Page = next.columnsPerPage * next.rowsPerPage
+            )
+        }
     }
 }

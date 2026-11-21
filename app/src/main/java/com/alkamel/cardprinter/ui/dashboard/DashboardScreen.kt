@@ -118,28 +118,28 @@ fun DashboardScreen(
         listOf(
             DashboardTile(
                 title = "طباعة كروت",
-                subtitle = "توليد وإضافة وطباعة A4",
+                subtitle = "توليد وإضافة يوزر منجر A4",
                 icon = Icons.Rounded.Print,
                 accentColor = ext.royalActionBlue,
                 route = AppRoutes.CARD_GENERATION
             ),
             DashboardTile(
-                title = "كروت يوزر مانجر",
-                subtitle = "${state.totalCardsCount} كرت محفوظ",
+                title = "كروت يوزر منجر",
+                subtitle = "${state.totalCardsCount} كرت يوزر منجر",
                 icon = Icons.Rounded.CreditCard,
                 accentColor = ext.voucherGreen,
                 route = AppRoutes.USER_MANAGER_CARDS
             ),
             DashboardTile(
                 title = "الباقات",
-                subtitle = "باقات المايكروتيك والأسعار",
+                subtitle = "باقات يوزر منجر والأسعار",
                 icon = Icons.Rounded.Folder,
                 accentColor = ext.reportAmberGold,
                 route = AppRoutes.PACKAGES
             ),
             DashboardTile(
                 title = "المبيعات",
-                subtitle = "سجل العمليات والفواتير",
+                subtitle = "مبيعات كروت يوزر منجر",
                 icon = Icons.Rounded.MonetizationOn,
                 accentColor = ext.reportTeal,
                 route = AppRoutes.SALES
@@ -153,14 +153,14 @@ fun DashboardScreen(
             ),
             DashboardTile(
                 title = "التقارير",
-                subtitle = "إحصائيات فعلية وتصدير PDF",
+                subtitle = "تقارير يوزر منجر وتصدير PDF",
                 icon = Icons.Rounded.Assessment,
                 accentColor = ext.reportPurple,
                 route = AppRoutes.REPORTS
             ),
             DashboardTile(
                 title = "تصميم الكرت",
-                subtitle = "القوالب والخلفيات وQR",
+                subtitle = "قوالب يوزر منجر وورق A4",
                 icon = Icons.Rounded.Palette,
                 accentColor = ext.reportBlue,
                 route = AppRoutes.CARD_DESIGNER
@@ -282,7 +282,7 @@ fun DashboardScreen(
                 )
             }
 
-            // "يوزر مانجر" Action Strip
+            // "يوزر منجر" Action Strip
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -300,7 +300,7 @@ fun DashboardScreen(
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp)
                 ) {
                     Text(
-                        text = "يوزر مانجر",
+                        text = "يوزر منجر",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )

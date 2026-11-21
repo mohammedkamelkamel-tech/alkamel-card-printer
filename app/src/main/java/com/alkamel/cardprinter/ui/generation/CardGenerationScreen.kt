@@ -23,8 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ExitToApp
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.CloudDone
-import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material3.Button
@@ -102,7 +100,7 @@ fun CardGenerationScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             AlkamelTopHeader(
-                title = "طباعة كروت يوزر مانجر",
+                title = "طباعة كروت يوزر منجر",
                 onNavigateBack = onNavigateBack,
                 trailingAction = {
                     Button(
@@ -133,41 +131,6 @@ fun CardGenerationScreen(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // MikroTik Connection Status Banner
-            item {
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (state.isConnectedToMikrotik) ext.voucherGreen.copy(alpha = 0.14f)
-                        else ext.destructivePink.copy(alpha = 0.14f)
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (state.isConnectedToMikrotik) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
-                            contentDescription = null,
-                            tint = if (state.isConnectedToMikrotik) ext.voucherGreen else ext.destructivePink
-                        )
-                        Text(
-                            text = if (state.isConnectedToMikrotik) {
-                                "متصل بالمايكروتيك (${state.mikrotikHostLabel}) • الحساب: ${state.accountName}"
-                            } else {
-                                "غير متصل بالمايكروتيك — لن تتم الإضافة للسيرفر حتى يتم الربط الفعلي بالمايكروتيك"
-                            },
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = if (state.isConnectedToMikrotik) ext.voucherGreen else ext.destructivePink
-                        )
-                    }
-                }
-            }
 
             item {
                 Card(
@@ -180,11 +143,11 @@ fun CardGenerationScreen(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // Server Account Field
+                        // User Manager Customer / Account Field
                         OutlinedTextField(
                             value = state.accountName,
                             onValueChange = viewModel::onAccountChange,
-                            label = { Text("الحساب / السيرفر الفعلي") },
+                            label = { Text("حساب يوزر منجر (Customer)") },
                             singleLine = true,
                             shape = RoundedCornerShape(12.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -267,7 +230,7 @@ fun CardGenerationScreen(
                                     OutlinedTextField(
                                         value = state.selectedPackageName,
                                         onValueChange = viewModel::onPackageNameManualChange,
-                                        label = { Text("اسم الباقة (من المايكروتيك)") },
+                                        label = { Text("باقة يوزر منجر") },
                                         singleLine = true,
                                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = packageExpanded) },
                                         shape = RoundedCornerShape(10.dp),
@@ -303,7 +266,7 @@ fun CardGenerationScreen(
                                 OutlinedTextField(
                                     value = state.selectedPackageName,
                                     onValueChange = viewModel::onPackageNameManualChange,
-                                    label = { Text("اسم الباقة (Profile)") },
+                                    label = { Text("باقة يوزر منجر (Profile)") },
                                     singleLine = true,
                                     shape = RoundedCornerShape(10.dp),
                                     colors = OutlinedTextFieldDefaults.colors(
@@ -610,9 +573,9 @@ fun CardGenerationScreen(
 
                     Text(
                         text = when {
-                            hasError -> "تعذرت الإضافة إلى المايكروتيك"
-                            state.additionCompleted -> "اكتملت الإضافة إلى المايكروتيك بنجاح"
-                            else -> "جاري الإضافة الفعلية إلى المايكروتيك..."
+                            hasError -> "تعذرت الإضافة إلى يوزر منجر"
+                            state.additionCompleted -> "اكتملت الإضافة إلى يوزر منجر بنجاح"
+                            else -> "جاري الإضافة الفعلية إلى يوزر منجر..."
                         },
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.ExtraBold,

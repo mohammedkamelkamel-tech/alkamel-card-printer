@@ -78,8 +78,6 @@ fun LoginScreen(
 
     val loadOptions = listOf(
         NetworkLoadType.LOAD_USER_MANAGER,
-        NetworkLoadType.LOAD_HOTSPOT,
-        NetworkLoadType.LOAD_ALL,
         NetworkLoadType.NO_LOAD
     )
 
@@ -117,7 +115,7 @@ fun LoginScreen(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "الربط المباشر بسيرفر المايكروتيك وطباعة الكروت بمقاس A4",
+                        text = "إدارة وطباعة كروت يوزر منجر (User Manager) بمقاس A4",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )

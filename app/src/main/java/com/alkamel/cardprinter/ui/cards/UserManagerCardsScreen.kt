@@ -132,7 +132,7 @@ fun UserManagerCardsScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             AlkamelTopHeader(
-                title = "كروت يوزر مانجر",
+                title = "كروت يوزر منجر",
                 onNavigateBack = onNavigateBack,
                 trailingAction = {
                     Row(verticalAlignment = Alignment.CenterVertically) {

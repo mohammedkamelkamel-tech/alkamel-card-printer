@@ -1,11 +1,8 @@
 package com.alkamel.cardprinter.data.local.model
 
 enum class NetworkLoadType(val arabicLabel: String) {
-    LOAD_USER_MANAGER("تحميل كروت يوزرمانجر"),
-    LOAD_HOTSPOT("تحميل كروت هوتسبوت"),
-    LOAD_ALL("تحميل الكل"),
-    NO_LOAD("عدم التحميل"),
-    OFFLINE_LOCAL("تشغيل محلي مباشر")
+    LOAD_USER_MANAGER("تحميل كروت وباقات يوزر منجر"),
+    NO_LOAD("عدم التحميل الآن")
 }
 
 enum class CardStatus(val arabicLabel: String) {
