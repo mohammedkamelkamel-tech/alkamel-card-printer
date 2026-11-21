@@ -1,0 +1,35 @@
+package com.alkamel.cardprinter.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+val HeaderNavy = Color(0xFF111B2E)
+val RoyalActionBlue = Color(0xFF1565C0)
+val SkyFabBlue = Color(0xFF039BE5)
+val VoucherGreen = Color(0xFF2E7D32)
+val VoucherGreenAccent = Color(0xFF43A047)
+val VoucherRose = Color(0xFFC23B69)
+val ExpiredBurgundy = Color(0xFF880E4F)
+val ExpiredCoralBadge = Color(0xFFD8436A)
+val ReportPurple = Color(0xFF6A1B9A)
+val ReportPurpleAccent = Color(0xFF8E24AA)
+val ReportBlue = Color(0xFF1565C0)
+val ReportBlueAccent = Color(0xFF1E88E5)
+val ReportTeal = Color(0xFF00838F)
+val ReportAmberGold = Color(0xFFE68A00)
+val ReportTerracotta = Color(0xFFC84B31)
+val DestructivePink = Color(0xFFC63963)
+val ActionCoral = Color(0xFFE55353)
+
+val LightBackground = Color(0xFFF3F6FA)
+val LightSurface = Color(0xFFFFFFFF)
+val LightOnSurface = Color(0xFF0F172A)
+val LightOnSurfaceVariant = Color(0xFF475569)
+val LightInputContainer = Color(0xFFF1F5F9)
+val LightInputBorder = Color(0xFFCBD5E1)
+
+val DarkBackground = Color(0xFF0B1220)
+val DarkSurface = Color(0xFF162133)
+val DarkOnSurface = Color(0xFFF8FAFC)
+val DarkOnSurfaceVariant = Color(0xFFCBD5E1)
+val DarkInputContainer = Color(0xFF1E2B40)
+val DarkInputBorder = Color(0xFF334155)

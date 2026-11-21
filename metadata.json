@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "الكامل-طباعة الكروت",
+  "description": "تطبيق الكامل-لطباعة كروت الشبكة",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
