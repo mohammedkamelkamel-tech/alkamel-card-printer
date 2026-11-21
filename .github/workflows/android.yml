@@ -13,6 +13,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -49,23 +52,61 @@ jobs:
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=4
 
-      - name: Upload Debug APK
+      - name: Prepare Debug APK for Release
+        shell: bash
+        run: |
+          APK_FILE=$(ls app/build/outputs/apk/debug/*.apk | head -n 1)
+          cp "$APK_FILE" alkamel-card-printer-debug.apk
+          ls -lh alkamel-card-printer-debug.apk
+
+      - name: Publish Debug APK to GitHub Releases
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="latest-apk"
+          TITLE="الكامل-طباعة الكروت - APK (Build #${GITHUB_RUN_NUMBER})"
+          NOTES="تم بناء تطبيق الكامل-طباعة الكروت بنجاح من الفرع ${GITHUB_REF_NAME} (Commit: ${GITHUB_SHA::7}). قم بتحميل ملف alkamel-card-printer-debug.apk وتثبيته مباشرة على الهاتف."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" alkamel-card-printer-debug.apk --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create "$TAG" alkamel-card-printer-debug.apk \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes "$NOTES"
+          fi
+
+      - name: Upload Debug APK to Artifacts (Best Effort)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: alkamel-card-printer-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          path: alkamel-card-printer-debug.apk
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Build Release Unsigned APK (Optional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
         run: gradle :app:assembleRelease --no-daemon --stacktrace --console=plain --max-workers=4
 
-      - name: Upload Release APK (Optional)
+      - name: Publish Release APK to GitHub Releases (Optional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          RELEASE_APK=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+          cp "$RELEASE_APK" alkamel-card-printer-release-unsigned.apk
+          gh release upload "latest-apk" alkamel-card-printer-release-unsigned.apk --clobber
+
+      - name: Upload Release APK to Artifacts (Optional, Best Effort)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: alkamel-card-printer-release-apk
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          path: alkamel-card-printer-release-unsigned.apk
+          if-no-files-found: warn
+          retention-days: 3
