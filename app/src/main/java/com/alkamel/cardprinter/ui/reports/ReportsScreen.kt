@@ -1,6 +1,5 @@
 package com.alkamel.cardprinter.ui.reports
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,8 +15,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.Print
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -25,6 +26,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -45,10 +47,12 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.alkamel.cardprinter.data.printing.PdfPrintEngine
 import com.alkamel.cardprinter.ui.components.AlkamelTopHeader
 import com.alkamel.cardprinter.ui.theme.AlkamelTheme
+import java.util.Locale
 
 @Composable
 fun ReportsScreen(
@@ -59,6 +63,10 @@ fun ReportsScreen(
     val ext = AlkamelTheme.extendedColors
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshFromMikrotik()
+    }
 
     LaunchedEffect(state.statusMessage, state.errorMessage) {
         val msg = state.errorMessage ?: state.statusMessage
@@ -74,7 +82,27 @@ fun ReportsScreen(
         topBar = {
             AlkamelTopHeader(
                 title = "التقارير والإحصائيات",
-                onNavigateBack = onNavigateBack
+                onNavigateBack = onNavigateBack,
+                trailingAction = {
+                    IconButton(
+                        onClick = viewModel::refreshFromMikrotik,
+                        enabled = !state.isRefreshingMikrotik && state.isConnectedToMikrotik
+                    ) {
+                        if (state.isRefreshingMikrotik) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "تحديث التقارير من المايكروتيك",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
             )
         }
     ) { innerPadding ->
@@ -86,6 +114,42 @@ fun ReportsScreen(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            if (state.dataSourceNote.isNotBlank()) {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (state.isConnectedToMikrotik) ext.voucherGreen.copy(alpha = 0.12f)
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CloudDone,
+                            contentDescription = null,
+                            tint = if (state.isConnectedToMikrotik) ext.voucherGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = if (state.isRefreshingMikrotik) {
+                                "جاري جلب جلسات ومدفوعات اليوم من المايكروتيك..."
+                            } else {
+                                state.dataSourceNote
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+
             // Top 3 Percentage Indicators
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -108,20 +172,28 @@ fun ReportsScreen(
                 PercentageMetricCard(
                     title = "تحميل اليوم",
                     percent = state.todayDownloadPercent,
-                    subtitle = String.format("%.2f GB", state.todayDownloadGb),
+                    subtitle = String.format(Locale.US, "%.2f GB", state.todayDownloadGb),
                     color = ext.reportTeal,
                     modifier = Modifier.weight(1f)
                 )
             }
 
             // Sales Bars Card (اليوم، أمس، أسبوعياً، شهرياً)
-            val maxAmount = maxOf(
+            val maxMetric = maxOf(
                 1.0,
                 state.report.today.totalAmount,
                 state.report.yesterday.totalAmount,
                 state.report.weekly.totalAmount,
                 state.report.monthly.totalAmount
             )
+            val maxCards = maxOf(
+                1,
+                state.report.today.totalCards,
+                state.report.yesterday.totalCards,
+                state.report.weekly.totalCards,
+                state.report.monthly.totalCards
+            )
+            val useCardFraction = maxMetric <= 1.0
 
             Card(
                 shape = RoundedCornerShape(18.dp),
@@ -134,7 +206,7 @@ fun ReportsScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "ملخص المبيعات حسب الفترة",
+                        text = "ملخص المبيعات والاستخدام حسب الفترة",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -143,34 +215,46 @@ fun ReportsScreen(
                         label = "مبيعات اليوم",
                         amount = state.report.today.totalAmount,
                         cards = state.report.today.totalCards,
-                        fraction = (state.report.today.totalAmount / maxAmount).toFloat(),
+                        fraction = if (useCardFraction) state.report.today.totalCards / maxCards.toFloat()
+                        else (state.report.today.totalAmount / maxMetric).toFloat(),
                         color = ext.voucherGreen
                     )
                     SalesPeriodBar(
                         label = "مبيعات أمس",
                         amount = state.report.yesterday.totalAmount,
                         cards = state.report.yesterday.totalCards,
-                        fraction = (state.report.yesterday.totalAmount / maxAmount).toFloat(),
+                        fraction = if (useCardFraction) state.report.yesterday.totalCards / maxCards.toFloat()
+                        else (state.report.yesterday.totalAmount / maxMetric).toFloat(),
                         color = ext.reportAmberGold
                     )
                     SalesPeriodBar(
                         label = "المبيعات الأسبوعية",
                         amount = state.report.weekly.totalAmount,
                         cards = state.report.weekly.totalCards,
-                        fraction = (state.report.weekly.totalAmount / maxAmount).toFloat(),
+                        fraction = if (useCardFraction) state.report.weekly.totalCards / maxCards.toFloat()
+                        else (state.report.weekly.totalAmount / maxMetric).toFloat(),
                         color = ext.reportBlue
                     )
                     SalesPeriodBar(
                         label = "المبيعات الشهرية",
                         amount = state.report.monthly.totalAmount,
                         cards = state.report.monthly.totalCards,
-                        fraction = (state.report.monthly.totalAmount / maxAmount).toFloat(),
+                        fraction = if (useCardFraction) state.report.monthly.totalCards / maxCards.toFloat()
+                        else (state.report.monthly.totalAmount / maxMetric).toFloat(),
                         color = ext.reportPurple
                     )
+
+                    if (useCardFraction && state.report.monthly.totalCards > 0) {
+                        Text(
+                            text = "ملاحظة: لتظهر المبالغ بالريال تلقائياً، حدد سعر كل باقة من شاشة «الباقات».",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
-            // Today Download & Inventory Info Cards
+            // Today Download & Top Consumed Package Info Cards
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -183,13 +267,13 @@ fun ReportsScreen(
                     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("معلومات تحميل اليوم", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
                         Text(
-                            text = String.format("%.2f GB", state.todayDownloadGb),
+                            text = String.format(Locale.US, "%.2f GB", state.todayDownloadGb),
                             color = Color.White,
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.ExtraBold
                         )
                         Text(
-                            text = "الإجمالي: ${String.format("%.2f GB", state.totalDownloadGb)}",
+                            text = "الإجمالي: ${String.format(Locale.US, "%.2f GB", state.totalDownloadGb)}",
                             color = Color(0xFFE1BEE7),
                             style = MaterialTheme.typography.labelMedium
                         )
@@ -202,17 +286,20 @@ fun ReportsScreen(
                     modifier = Modifier.weight(1f)
                 ) {
                     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("الأكثر مبيعاً", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
+                        Text("الأكثر مبيعاً / استخداماً", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
                         Text(
                             text = state.report.topSellingPackage?.packageName ?: "لا يوجد",
                             color = Color.White,
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.ExtraBold
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "متبقي غير مستخدم: ${state.unusedCardsCount}",
+                            text = state.topPackageSubtitle.ifBlank { "متبقي غير مستخدم: ${state.unusedCardsCount}" },
                             color = Color(0xFFB2DFDB),
-                            style = MaterialTheme.typography.labelMedium
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 2
                         )
                     }
                 }

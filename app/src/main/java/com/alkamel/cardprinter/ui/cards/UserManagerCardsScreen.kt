@@ -5,8 +5,10 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +18,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,28 +33,37 @@ import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FileUpload
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Print
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Router
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -66,11 +79,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.alkamel.cardprinter.data.local.entity.CardEntity
+import com.alkamel.cardprinter.data.local.entity.CardSessionEntity
 import com.alkamel.cardprinter.data.local.model.CardStatus
 import com.alkamel.cardprinter.ui.components.AlkamelConfirmationDialog
 import com.alkamel.cardprinter.ui.components.AlkamelTopHeader
 import com.alkamel.cardprinter.ui.theme.AlkamelTheme
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UserManagerCardsScreen(
     viewModel: UserManagerCardsViewModel,
@@ -82,6 +97,7 @@ fun UserManagerCardsScreen(
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var pendingDeleteSingleCard by remember { mutableStateOf<CardEntity?>(null) }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -241,13 +257,20 @@ fun UserManagerCardsScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "عدد الكروت: ${state.filteredCards.size}" +
-                        if (state.selectedCardIds.isNotEmpty()) "  •  محدد: ${state.selectedCardIds.size}" else "",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
+                Column {
+                    Text(
+                        text = "عدد الكروت: ${state.filteredCards.size}" +
+                            if (state.selectedCardIds.isNotEmpty()) "  •  محدد: ${state.selectedCardIds.size}" else "",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Text(
+                        text = "اضغط على أي كرت لعرض جلساته • اضغط الأيقونة للتحديد",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -341,11 +364,44 @@ fun UserManagerCardsScreen(
                         GreenVoucherCard(
                             card = card,
                             isSelected = card.id in state.selectedCardIds,
-                            onClick = { viewModel.toggleCardSelection(card.id) }
+                            onCardClick = { viewModel.openCardDetails(card) },
+                            onToggleSelect = { viewModel.toggleCardSelection(card.id) }
                         )
                     }
                 }
             }
+        }
+    }
+
+    // Card Sessions Detail BottomSheet (opens when tapping any card)
+    state.inspectedCard?.let { card ->
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val isCardSelected = card.id in state.selectedCardIds
+
+        ModalBottomSheet(
+            onDismissRequest = viewModel::closeCardDetails,
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            CardSessionsDetailSheetContent(
+                card = card,
+                isSelected = isCardSelected,
+                sessions = state.inspectedCardSessions,
+                isLoading = state.isLoadingCardSessions,
+                sourceNote = state.cardSessionsSourceNote,
+                errorMessage = state.cardSessionsError,
+                onRefreshSessions = viewModel::refreshInspectedCardSessions,
+                onToggleSelect = { viewModel.toggleCardSelection(card.id) },
+                onPrintSingleCard = {
+                    if (viewModel.dispatchSingleCardToA4Print(card)) {
+                        viewModel.closeCardDetails()
+                        onNavigateToPrintPreview()
+                    }
+                },
+                onDeleteSingleCard = {
+                    pendingDeleteSingleCard = card
+                }
+            )
         }
     }
 
@@ -363,13 +419,30 @@ fun UserManagerCardsScreen(
             onDismiss = { showDeleteConfirm = false }
         )
     }
+
+    pendingDeleteSingleCard?.let { cardToDelete ->
+        AlkamelConfirmationDialog(
+            title = "حذف الكرت (${cardToDelete.username})",
+            message = "هل تريد حذف هذا الكرت نهائياً من قاعدة البيانات والمايكروتيك؟",
+            confirmText = "حذف نهائي",
+            dismissText = "إلغاء",
+            isDestructive = true,
+            onConfirm = {
+                pendingDeleteSingleCard = null
+                viewModel.deleteSingleCard(cardToDelete)
+            },
+            onDismiss = { pendingDeleteSingleCard = null }
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GreenVoucherCard(
     card: CardEntity,
     isSelected: Boolean,
-    onClick: () -> Unit
+    onCardClick: () -> Unit,
+    onToggleSelect: () -> Unit
 ) {
     val ext = AlkamelTheme.extendedColors
     Card(
@@ -379,7 +452,10 @@ private fun GreenVoucherCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onCardClick,
+                onLongClick = onToggleSelect
+            )
     ) {
         Column(
             modifier = Modifier
@@ -396,12 +472,16 @@ private fun GreenVoucherCard(
                     modifier = Modifier
                         .size(46.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.20f)),
+                        .background(
+                            if (isSelected) Color(0xFFFFCA28).copy(alpha = 0.28f)
+                            else Color.White.copy(alpha = 0.20f)
+                        )
+                        .clickable(onClick = onToggleSelect),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (isSelected) Icons.Rounded.CheckCircle else Icons.Rounded.AccountBalanceWallet,
-                        contentDescription = null,
+                        contentDescription = "تحديد الكرت",
                         tint = if (isSelected) Color(0xFFFFCA28) else Color.White,
                         modifier = Modifier.size(26.dp)
                     )
@@ -464,18 +544,412 @@ private fun GreenVoucherCard(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = "الحالة: ${card.status.arabicLabel}",
                     style = MaterialTheme.typography.labelMedium,
                     color = Color(0xFFE8F5E9)
                 )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = if (card.isPrinted) "مطبوع: ${card.printedDateKey.orEmpty()}" else "غير مطبوع",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFFFFF59D),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Surface(
+                        color = Color.White.copy(alpha = 0.18f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.History,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = "الجلسات",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CardSessionsDetailSheetContent(
+    card: CardEntity,
+    isSelected: Boolean,
+    sessions: List<CardSessionEntity>,
+    isLoading: Boolean,
+    sourceNote: String,
+    errorMessage: String?,
+    onRefreshSessions: () -> Unit,
+    onToggleSelect: () -> Unit,
+    onPrintSingleCard: () -> Unit,
+    onDeleteSingleCard: () -> Unit
+) {
+    val ext = AlkamelTheme.extendedColors
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Card Header Summary
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = ext.headerNavy),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "تفاصيل وجلسات الكرت",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Text(
+                            text = card.username,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
+                    }
+                    IconButton(
+                        onClick = onRefreshSessions,
+                        enabled = !isLoading
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "تحديث جلسات الكرت",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.16f))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "كلمة السر: ${card.password.ifBlank { "بدون" }}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFFE2E8F0)
+                    )
+                    Text(
+                        text = "الباقة: ${card.packageName.ifBlank { "-" }}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFFFFF59D),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "الحالة: ${card.status.arabicLabel}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFF81C784),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "إجمالي الاستهلاك: ${card.dataUsageLabel} • المدة: ${card.uptimeLabel}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White
+                    )
+                }
+            }
+        }
+
+        // Quick Action Buttons without conflicting with list selection
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onToggleSelect,
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.CheckCircle,
+                    contentDescription = null,
+                    tint = if (isSelected) ext.voucherGreen else ext.royalActionBlue,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = if (card.isPrinted) "مطبوع: ${card.printedDateKey.orEmpty()}" else "غير مطبوع",
+                    text = if (isSelected) "إلغاء التحديد" else "تحديد",
                     style = MaterialTheme.typography.labelMedium,
-                    color = Color(0xFFFFF59D),
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Button(
+                onClick = onPrintSingleCard,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = ext.royalActionBlue, contentColor = Color.White),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Rounded.Print, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("طباعة", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            }
+            Button(
+                onClick = onDeleteSingleCard,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = ext.destructivePink, contentColor = Color.White),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                modifier = Modifier.weight(0.9f)
+            ) {
+                Icon(Icons.Rounded.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("حذف", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // Sessions Section Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "سجل جلسات الكرت (${sessions.size})",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            if (sourceNote.isNotBlank()) {
+                Text(
+                    text = sourceNote,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        if (!errorMessage.isNullOrBlank()) {
+            Card(
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(containerColor = ext.destructivePink.copy(alpha = 0.12f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = errorMessage,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ext.destructivePink,
+                    modifier = Modifier.padding(10.dp)
+                )
+            }
+        }
+
+        if (isLoading && sessions.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(140.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(color = ext.royalActionBlue)
+                    Text(
+                        text = "جاري جلب جلسات الكرت من المايكروتيك...",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else if (sessions.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(120.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "لا توجد جلسات مسجلة لهذا الكرت بعد.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(sessions) { sess ->
+                    SessionDetailItemCard(session = sess)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionDetailItemCard(session: CardSessionEntity) {
+    val ext = AlkamelTheme.extendedColors
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (session.isActive) ext.voucherGreen.copy(alpha = 0.10f)
+            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+        ),
+        border = if (session.isActive) BorderStroke(1.5.dp, ext.voucherGreen) else null,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (session.isActive) ext.voucherGreen else Color(0xFF64748B)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (session.isActive) Icons.Rounded.Wifi else Icons.Rounded.Schedule,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = if (session.isActive) "جلسة نشطة الآن" else "جلسة منتهية",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Text(
+                    text = "المدة: ${session.uptime}",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = ext.royalActionBlue
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "البدء: ${session.startTime}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "الانتهاء: ${session.endTime}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "التحميل: ${session.downloadLabel}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ext.voucherGreen
+                )
+                Text(
+                    text = "الرفع: ${session.uploadLabel}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ext.reportAmberGold
+                )
+                Text(
+                    text = "الإجمالي: ${session.totalLabel}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Router,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "IP: ${session.userIp}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = "MAC: ${session.macAddress}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

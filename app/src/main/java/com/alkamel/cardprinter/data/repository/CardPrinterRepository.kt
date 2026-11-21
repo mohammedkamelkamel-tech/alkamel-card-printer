@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.alkamel.cardprinter.data.local.AlkamelDatabase
 import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
+import com.alkamel.cardprinter.data.local.entity.CardSessionEntity
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
 import com.alkamel.cardprinter.data.local.entity.PrintSalesLogEntity
 import com.alkamel.cardprinter.data.local.entity.SavedNetworkEntity
@@ -22,6 +23,7 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
     private val cardDao get() = database.cardDao()
     private val templateDao get() = database.cardTemplateDao()
     private val salesDao get() = database.printSalesLogDao()
+    private val sessionDao get() = database.cardSessionDao()
 
     private suspend inline fun <T> safeDbCall(crossinline block: suspend () -> T): Result<T> {
         return try {
@@ -38,8 +40,36 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
     suspend fun deleteNetwork(network: SavedNetworkEntity): Result<Unit> = safeDbCall { networkDao.deleteNetwork(network) }
 
     fun observeAllPackages(): Flow<List<CardPackageEntity>> = packageDao.observeAllPackages()
+    suspend fun getAllPackagesOnce(): List<CardPackageEntity> = packageDao.getAllPackagesOnce()
     suspend fun savePackage(pkg: CardPackageEntity): Result<Long> = safeDbCall { packageDao.upsertPackage(pkg) }
     suspend fun deletePackage(pkg: CardPackageEntity): Result<Unit> = safeDbCall { packageDao.deletePackage(pkg) }
+
+    /**
+     * Merges MikroTik profiles into Room while preserving any custom price/commission
+     * configured locally by the operator when MikroTik returns 0.0 for price.
+     */
+    suspend fun mergePackagesFromMikrotik(remotePackages: List<CardPackageEntity>): Result<List<CardPackageEntity>> =
+        safeDbCall {
+            val existingByName = packageDao.getAllPackagesOnce().associateBy { it.name.lowercase() }
+            val merged = remotePackages.map { remote ->
+                val existing = existingByName[remote.name.lowercase()]
+                if (existing != null) {
+                    remote.copy(
+                        id = existing.id,
+                        price = if (remote.price > 0.0) remote.price else existing.price,
+                        commission = if (existing.commission > 0.0) existing.commission else remote.commission,
+                        validityLabel = remote.validityLabel.ifBlank { existing.validityLabel },
+                        dataLimitMb = if (remote.dataLimitMb > 0.0) remote.dataLimitMb else existing.dataLimitMb
+                    )
+                } else {
+                    remote
+                }
+            }
+            database.withTransaction {
+                merged.forEach { packageDao.upsertPackage(it) }
+            }
+            merged
+        }
 
     fun observeAllCards(): Flow<List<CardEntity>> = cardDao.observeAllCards()
 
@@ -63,6 +93,7 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
                 if (existing != null) {
                     incoming.copy(
                         id = existing.id,
+                        price = if (incoming.price > 0.0) incoming.price else existing.price,
                         isPrinted = existing.isPrinted,
                         printedAt = existing.printedAt,
                         printedDateKey = existing.printedDateKey
@@ -106,6 +137,22 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
             }
         }
     }
+
+    fun observeSessionsForUser(username: String): Flow<List<CardSessionEntity>> =
+        sessionDao.observeSessionsForUser(username)
+
+    suspend fun getSessionsForUserOnce(username: String): List<CardSessionEntity> =
+        sessionDao.getSessionsForUserOnce(username)
+
+    suspend fun replaceSessionsForUser(username: String, sessions: List<CardSessionEntity>): Result<Unit> =
+        safeDbCall {
+            database.withTransaction {
+                sessionDao.deleteSessionsForUser(username)
+                if (sessions.isNotEmpty()) {
+                    sessionDao.insertSessions(sessions)
+                }
+            }
+        }
 
     fun observeAllTemplates(): Flow<List<CardTemplateEntity>> = templateDao.observeAllTemplates()
     suspend fun saveTemplate(template: CardTemplateEntity): Result<Long> = safeDbCall { templateDao.upsertTemplate(template) }

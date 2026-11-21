@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
+import com.alkamel.cardprinter.data.local.entity.CardSessionEntity
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
 import com.alkamel.cardprinter.data.local.model.CardStatus
 import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
@@ -35,6 +36,11 @@ data class UserManagerCardsUiState(
     val isConnectedToMikrotik: Boolean = false,
     val isSyncing: Boolean = false,
     val isImporting: Boolean = false,
+    val inspectedCard: CardEntity? = null,
+    val inspectedCardSessions: List<CardSessionEntity> = emptyList(),
+    val isLoadingCardSessions: Boolean = false,
+    val cardSessionsError: String? = null,
+    val cardSessionsSourceNote: String = "",
     val statusMessage: String? = null,
     val errorMessage: String? = null
 )
@@ -58,12 +64,16 @@ class UserManagerCardsViewModel(
             }.collect { bundle ->
                 _uiState.update { current ->
                     val validIds = bundle.cards.map { it.id }.toSet()
+                    val refreshedInspected = current.inspectedCard?.let { cur ->
+                        bundle.cards.firstOrNull { it.id == cur.id } ?: cur
+                    }
                     val updated = current.copy(
                         isConnectedToMikrotik = bundle.connected,
                         allCards = bundle.cards,
                         packages = bundle.pkgs,
                         templates = bundle.templates,
-                        selectedCardIds = current.selectedCardIds.intersect(validIds)
+                        selectedCardIds = current.selectedCardIds.intersect(validIds),
+                        inspectedCard = refreshedInspected
                     )
                     updated.copy(filteredCards = applyFilters(updated))
                 }
@@ -127,6 +137,151 @@ class UserManagerCardsViewModel(
         }
     }
 
+    fun openCardDetails(card: CardEntity) {
+        _uiState.update {
+            it.copy(
+                inspectedCard = card,
+                inspectedCardSessions = emptyList(),
+                isLoadingCardSessions = true,
+                cardSessionsError = null,
+                cardSessionsSourceNote = "جاري تحميل جلسات الكرت..."
+            )
+        }
+        viewModelScope.launch {
+            val cached = repository.getSessionsForUserOnce(card.username)
+            if (cached.isNotEmpty()) {
+                _uiState.update {
+                    if (it.inspectedCard?.username == card.username) {
+                        it.copy(
+                            inspectedCardSessions = cached,
+                            cardSessionsSourceNote = "عرض الجلسات المحفوظة محلياً • جاري التحديث من المايكروتيك..."
+                        )
+                    } else it
+                }
+            }
+            fetchSessionsLiveFor(card)
+        }
+    }
+
+    fun refreshInspectedCardSessions() {
+        val card = _uiState.value.inspectedCard ?: return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isLoadingCardSessions = true,
+                    cardSessionsError = null,
+                    cardSessionsSourceNote = "جاري جلب الجلسات مباشرة من المايكروتيك..."
+                )
+            }
+            fetchSessionsLiveFor(card)
+        }
+    }
+
+    fun closeCardDetails() {
+        _uiState.update {
+            it.copy(
+                inspectedCard = null,
+                inspectedCardSessions = emptyList(),
+                isLoadingCardSessions = false,
+                cardSessionsError = null,
+                cardSessionsSourceNote = ""
+            )
+        }
+    }
+
+    private suspend fun fetchSessionsLiveFor(card: CardEntity) {
+        val session = LocalSessionHolder.activeSession.value
+        if (session == null || session.hostAddress.isBlank() || !session.isConnectedToMikrotik) {
+            val cached = repository.getSessionsForUserOnce(card.username)
+            _uiState.update {
+                if (it.inspectedCard?.username == card.username) {
+                    it.copy(
+                        inspectedCardSessions = cached,
+                        isLoadingCardSessions = false,
+                        cardSessionsSourceNote = if (cached.isNotEmpty()) {
+                            "غير متصل بالمايكروتيك — يتم عرض الجلسات المحفوظة محلياً"
+                        } else {
+                            "غير متصل بالمايكروتيك"
+                        }
+                    )
+                } else it
+            }
+            return
+        }
+
+        val res = MikrotikSyncManager.fetchSessionsForUser(
+            credentials = session.toCredentials(),
+            loadType = session.loadType,
+            username = card.username,
+            repository = repository
+        )
+        res.onSuccess { liveSessions ->
+            _uiState.update {
+                if (it.inspectedCard?.username == card.username) {
+                    it.copy(
+                        inspectedCardSessions = liveSessions,
+                        isLoadingCardSessions = false,
+                        cardSessionsError = null,
+                        cardSessionsSourceNote = "تم التحديث مباشرة من المايكروتيك (${liveSessions.size} جلسة)"
+                    )
+                } else it
+            }
+        }.onFailure { err ->
+            val cached = repository.getSessionsForUserOnce(card.username)
+            _uiState.update {
+                if (it.inspectedCard?.username == card.username) {
+                    it.copy(
+                        inspectedCardSessions = cached,
+                        isLoadingCardSessions = false,
+                        cardSessionsError = err.localizedMessage ?: "تعذر جلب الجلسات من المايكروتيك.",
+                        cardSessionsSourceNote = if (cached.isNotEmpty()) "تم عرض آخر جلسات محفوظة محلياً" else ""
+                    )
+                } else it
+            }
+        }
+    }
+
+    fun dispatchSingleCardToA4Print(card: CardEntity): Boolean {
+        val state = _uiState.value
+        val matchingTemplate = state.templates.firstOrNull {
+            it.packageName.equals(card.packageName, ignoreCase = true)
+        } ?: state.templates.firstOrNull { it.isDefault } ?: state.templates.firstOrNull()
+
+        PrintQueueHolder.setQueue(cards = listOf(card), template = matchingTemplate)
+        return true
+    }
+
+    fun deleteSingleCard(card: CardEntity) {
+        viewModelScope.launch {
+            val session = LocalSessionHolder.activeSession.value
+            var mikrotikNote = ""
+            if (session != null && session.isConnectedToMikrotik) {
+                val remoteRes = MikrotikSyncManager.deleteCardsOnMikrotik(
+                    credentials = session.toCredentials(),
+                    loadType = session.loadType,
+                    cards = listOf(card)
+                )
+                if (remoteRes.isSuccess && remoteRes.getOrDefault(0) > 0) {
+                    mikrotikNote = " (وحُذف من المايكروتيك)"
+                }
+            }
+            repository.deleteCardsByIds(listOf(card.id))
+                .onSuccess {
+                    _uiState.update {
+                        it.copy(
+                            inspectedCard = null,
+                            inspectedCardSessions = emptyList(),
+                            selectedCardIds = it.selectedCardIds - card.id,
+                            statusMessage = "تم حذف الكرت ${card.username}$mikrotikNote."
+                        )
+                    }
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(errorMessage = err.localizedMessage ?: "تعذر حذف الكرت") }
+                }
+        }
+    }
+
     fun clearMessages() {
         _uiState.update { it.copy(statusMessage = null, errorMessage = null) }
     }
@@ -149,7 +304,7 @@ class UserManagerCardsViewModel(
                 _uiState.update {
                     it.copy(
                         isSyncing = false,
-                        statusMessage = "تم تحديث ${summary.cardsSynced} كرت و ${summary.packagesSynced} باقة من المايكروتيك."
+                        statusMessage = "تم تحديث الكروت والجلسات بالكامل (${summary.cardsSynced} كرت • ${summary.packagesSynced} باقة)."
                     )
                 }
             }.onFailure { err ->

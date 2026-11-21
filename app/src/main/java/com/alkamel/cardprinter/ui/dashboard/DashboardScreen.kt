@@ -1,5 +1,10 @@
 package com.alkamel.cardprinter.ui.dashboard
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,8 +30,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Assessment
-import androidx.compose.material.icons.rounded.CloudDone
-import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CreditCard
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.MonetizationOn
@@ -43,15 +46,18 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -90,12 +96,29 @@ fun DashboardScreen(
     val state by viewModel.uiState.collectAsState()
     val ext = AlkamelTheme.extendedColors
     var showQuickActionsSheet by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Start live MikroTik telemetry polling while Dashboard is active, stop cleanly on leave
+    DisposableEffect(Unit) {
+        viewModel.startLivePolling()
+        onDispose {
+            viewModel.stopLivePolling()
+        }
+    }
+
+    LaunchedEffect(state.syncCompletionMessage) {
+        val msg = state.syncCompletionMessage
+        if (!msg.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearSyncCompletionMessage()
+        }
+    }
 
     val tiles = remember(state.totalCardsCount, state.expiredCardsCount, ext) {
         listOf(
             DashboardTile(
                 title = "طباعة كروت",
-                subtitle = "توليد وإضافة للمايكروتيك وطباعة A4",
+                subtitle = "توليد وإضافة وطباعة A4",
                 icon = Icons.Rounded.Print,
                 accentColor = ext.royalActionBlue,
                 route = AppRoutes.CARD_GENERATION
@@ -153,6 +176,7 @@ fun DashboardScreen(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = MaterialTheme.colorScheme.background,
         floatingActionButton = {
             FloatingActionButton(
@@ -169,26 +193,31 @@ fun DashboardScreen(
             }
         },
         bottomBar = {
-            Surface(
-                tonalElevation = 4.dp,
-                shadowElevation = 6.dp,
-                color = MaterialTheme.colorScheme.surface
+            // Progress bar appears ONLY during active sync and auto-hides completely once 100% finishes
+            AnimatedVisibility(
+                visible = state.isSyncBarVisible,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut()
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                Surface(
+                    tonalElevation = 4.dp,
+                    shadowElevation = 6.dp,
+                    color = MaterialTheme.colorScheme.surface
                 ) {
-                    Text(
-                        text = state.sessionLoadLabel,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (state.isConnectedToMikrotik) ext.voucherGreen else ext.destructivePink,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (state.isLoadingSessions || state.sessionLoadProgress > 0) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = state.sessionLoadLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = ext.royalActionBlue,
+                            modifier = Modifier.weight(1f)
+                        )
                         LinearProgressIndicator(
                             progress = { (state.sessionLoadProgress / 100f).coerceIn(0f, 1f) },
                             modifier = Modifier
@@ -215,99 +244,42 @@ fun DashboardScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Top Dark Header showing ONLY REAL MikroTik Telemetry ("--" when disconnected)
-            Column(
+            // Top Dark Header showing LIVE REAL MikroTik Telemetry ("--" when disconnected)
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(
                         color = ext.headerNavy,
                         shape = RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp)
                     )
-                    .padding(horizontal = 12.dp, vertical = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                    .padding(horizontal = 12.dp, vertical = 18.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    MetricGaugeCircle(
-                        label = "المعالج",
-                        valueText = state.cpuPercent?.let { "$it%" } ?: "--",
-                        waveFillFraction = state.cpuPercent?.let { it / 100f } ?: 0f,
-                        isLive = state.isConnectedToMikrotik
-                    )
-                    MetricGaugeCircle(
-                        label = "المتصلين",
-                        valueText = state.activeConnectionsCount?.toString() ?: "--",
-                        waveFillFraction = 0f,
-                        isLive = state.isConnectedToMikrotik
-                    )
-                    MetricGaugeCircle(
-                        label = "مدة التشغيل",
-                        valueText = state.uptimeDisplay ?: "--",
-                        waveFillFraction = 0f,
-                        isLive = state.isConnectedToMikrotik
-                    )
-                    MetricGaugeCircle(
-                        label = "التحميل",
-                        valueText = state.todayDownloadDisplay ?: "--",
-                        waveFillFraction = 0f,
-                        isLive = state.isConnectedToMikrotik
-                    )
-                }
-
-                // Real Connection Status Pill inside header
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            if (state.isConnectedToMikrotik) Color(0xFF1B5E20).copy(alpha = 0.45f)
-                            else Color(0xFFB71C1C).copy(alpha = 0.45f)
-                        )
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = if (state.isConnectedToMikrotik) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
-                            contentDescription = null,
-                            tint = if (state.isConnectedToMikrotik) Color(0xFF81C784) else Color(0xFFFF8A80),
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = if (state.isConnectedToMikrotik) {
-                                "متصل بالمايكروتيك (${state.hostPortLabel})" +
-                                    if (state.routerOsVersion.isNotBlank()) " • RouterOS ${state.routerOsVersion}" else ""
-                            } else {
-                                state.connectionError ?: "غير متصل بالمايكروتيك — اضغط تحديث لإعادة المحاولة"
-                            },
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 2
-                        )
-                    }
-
-                    IconButton(
-                        onClick = viewModel::refreshMikrotikNow,
-                        enabled = !state.isLoadingSessions,
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = "تحديث ومزامنة المايكروتيك",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
+                MetricGaugeCircle(
+                    label = "المعالج",
+                    valueText = state.cpuPercent?.let { "$it%" } ?: "--",
+                    waveFillFraction = state.cpuPercent?.let { it / 100f } ?: 0f,
+                    isLive = state.isConnectedToMikrotik
+                )
+                MetricGaugeCircle(
+                    label = "المتصلين",
+                    valueText = state.activeConnectionsCount?.toString() ?: "--",
+                    waveFillFraction = 0f,
+                    isLive = state.isConnectedToMikrotik
+                )
+                MetricGaugeCircle(
+                    label = "مدة التشغيل",
+                    valueText = state.uptimeDisplay ?: "--",
+                    waveFillFraction = 0f,
+                    isLive = state.isConnectedToMikrotik
+                )
+                MetricGaugeCircle(
+                    label = "التحميل",
+                    valueText = state.todayDownloadDisplay ?: "--",
+                    waveFillFraction = 0f,
+                    isLive = state.isConnectedToMikrotik
+                )
             }
 
             // "يوزر مانجر" Action Strip

@@ -10,11 +10,13 @@ import com.alkamel.cardprinter.AlkamelCardPrinterApplication
 import com.alkamel.cardprinter.data.local.converter.AlkamelTypeConverters
 import com.alkamel.cardprinter.data.local.dao.CardDao
 import com.alkamel.cardprinter.data.local.dao.CardPackageDao
+import com.alkamel.cardprinter.data.local.dao.CardSessionDao
 import com.alkamel.cardprinter.data.local.dao.CardTemplateDao
 import com.alkamel.cardprinter.data.local.dao.PrintSalesLogDao
 import com.alkamel.cardprinter.data.local.dao.SavedNetworkDao
 import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
+import com.alkamel.cardprinter.data.local.entity.CardSessionEntity
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
 import com.alkamel.cardprinter.data.local.entity.PrintSalesLogEntity
 import com.alkamel.cardprinter.data.local.entity.SavedNetworkEntity
@@ -29,9 +31,10 @@ import kotlinx.coroutines.launch
         CardPackageEntity::class,
         CardEntity::class,
         CardTemplateEntity::class,
-        PrintSalesLogEntity::class
+        PrintSalesLogEntity::class,
+        CardSessionEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(AlkamelTypeConverters::class)
@@ -42,6 +45,7 @@ abstract class AlkamelDatabase : RoomDatabase() {
     abstract fun cardDao(): CardDao
     abstract fun cardTemplateDao(): CardTemplateDao
     abstract fun printSalesLogDao(): PrintSalesLogDao
+    abstract fun cardSessionDao(): CardSessionDao
 
     companion object {
         @Volatile
