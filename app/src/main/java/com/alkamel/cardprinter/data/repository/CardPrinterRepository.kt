@@ -54,6 +54,32 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
         inserted
     }
 
+    suspend fun upsertCards(cards: List<CardEntity>): Result<Int> = safeDbCall {
+        if (cards.isEmpty()) return@safeDbCall 0
+        database.withTransaction {
+            val existingByUsername = cardDao.getAllCardsOnce().associateBy { it.username }
+            val merged = cards.map { incoming ->
+                val existing = existingByUsername[incoming.username]
+                if (existing != null) {
+                    incoming.copy(
+                        id = existing.id,
+                        isPrinted = existing.isPrinted,
+                        printedAt = existing.printedAt,
+                        printedDateKey = existing.printedDateKey
+                    )
+                } else {
+                    incoming
+                }
+            }
+            merged.chunked(500).forEach { chunk ->
+                cardDao.upsertCards(chunk)
+            }
+        }
+        cards.size
+    }
+
+    suspend fun syncCardsFromMikrotik(remoteCards: List<CardEntity>): Result<Int> = upsertCards(remoteCards)
+
     suspend fun markCardsAsPrinted(cardIds: List<Long>, printedAt: Long, dateKey: String): Result<Unit> = safeDbCall {
         if (cardIds.isEmpty()) return@safeDbCall
         database.withTransaction {

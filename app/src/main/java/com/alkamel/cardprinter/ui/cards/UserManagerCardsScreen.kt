@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,10 +33,12 @@ import androidx.compose.material.icons.rounded.Print
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SelectAll
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -118,16 +119,36 @@ fun UserManagerCardsScreen(
                 title = "كروت يوزر مانجر",
                 onNavigateBack = onNavigateBack,
                 trailingAction = {
-                    IconButton(
-                        onClick = {
-                            importLauncher.launch(arrayOf("text/plain", "text/csv", "text/*", "application/octet-stream"))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = viewModel::syncFromMikrotik,
+                            enabled = !state.isSyncing
+                        ) {
+                            if (state.isSyncing) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Sync,
+                                    contentDescription = "مزامنة من المايكروتيك",
+                                    tint = Color.White
+                                )
+                            }
                         }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.FileUpload,
-                            contentDescription = "استيراد TXT/CSV",
-                            tint = Color.White
-                        )
+                        IconButton(
+                            onClick = {
+                                importLauncher.launch(arrayOf("text/plain", "text/csv", "text/*", "application/octet-stream"))
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.FileUpload,
+                                contentDescription = "استيراد TXT/CSV",
+                                tint = Color.White
+                            )
+                        }
                     }
                 }
             )
@@ -140,7 +161,6 @@ fun UserManagerCardsScreen(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Print Date Search Bar + Search Button
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -172,7 +192,6 @@ fun UserManagerCardsScreen(
                 }
             }
 
-            // Status Filters Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -198,7 +217,6 @@ fun UserManagerCardsScreen(
                 }
             }
 
-            // Category / Package Filters Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -218,7 +236,6 @@ fun UserManagerCardsScreen(
                 }
             }
 
-            // Counter & Select All Strip
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -254,7 +271,6 @@ fun UserManagerCardsScreen(
                 }
             }
 
-            // Action Buttons Bar: إعادة الإضافة | طباعة | حذف
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -298,7 +314,6 @@ fun UserManagerCardsScreen(
                 }
             }
 
-            // Interactive Green Voucher Cards List
             if (state.filteredCards.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -307,7 +322,11 @@ fun UserManagerCardsScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "لا توجد كروت مطابقة لمعايير البحث الحالية.",
+                        text = if (state.allCards.isEmpty()) {
+                            "لا توجد كروت مجلوبة بعد. اربط بالمايكروتيك واضغط زر المزامنة (أعلى الشاشة) أو ولّد كروتاً جديدة."
+                        } else {
+                            "لا توجد كروت مطابقة لمعايير البحث الحالية."
+                        },
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -333,7 +352,7 @@ fun UserManagerCardsScreen(
     if (showDeleteConfirm) {
         AlkamelConfirmationDialog(
             title = "تأكيد حذف الكروت",
-            message = "هل تريد حذف ${viewModel.getActionTargetCount()} كرت من القائمة الحالية؟ لا يمكن التراجع بعد الحذف.",
+            message = "هل تريد حذف ${viewModel.getActionTargetCount()} كرت من القائمة الحالية؟ سيتم حذفها من المايكروتيك أيضاً عند توفر الاتصال.",
             confirmText = "حذف نهائي",
             dismissText = "إلغاء",
             isDestructive = true,
@@ -430,13 +449,14 @@ private fun GreenVoucherCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "الباقة: ${card.packageName} (${card.price.toLong()} ريال)",
+                    text = "الباقة: ${card.packageName.ifBlank { "-" }}" +
+                        if (card.price > 0) " (${card.price.toLong()} ريال)" else "",
                     style = MaterialTheme.typography.labelLarge,
                     color = Color.White,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "نقطة البيع: ${card.pointOfSale.ifBlank { "-" }}",
+                    text = "الاستهلاك: ${card.dataUsageLabel}",
                     style = MaterialTheme.typography.labelLarge,
                     color = Color.White
                 )

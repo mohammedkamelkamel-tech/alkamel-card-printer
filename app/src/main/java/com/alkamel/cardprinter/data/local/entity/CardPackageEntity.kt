@@ -12,9 +12,8 @@ data class CardPackageEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0L,
     val name: String,
-    val price: Double = 100.0,
+    val price: Double = 0.0,
     val commission: Double = 0.0,
-    val pointOfSale: String = "ether3",
     val validityLabel: String = "",
     val dataLimitMb: Double = 0.0,
     val isActive: Boolean = true,

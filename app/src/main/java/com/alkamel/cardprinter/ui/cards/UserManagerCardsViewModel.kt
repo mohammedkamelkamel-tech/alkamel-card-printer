@@ -6,7 +6,9 @@ import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
 import com.alkamel.cardprinter.data.local.model.CardStatus
+import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
+import com.alkamel.cardprinter.data.session.LocalSessionHolder
 import com.alkamel.cardprinter.data.session.PrintQueueHolder
 import com.alkamel.cardprinter.data.util.CardImportParser
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +32,8 @@ data class UserManagerCardsUiState(
     val usernameQuery: String = "",
     val selectedStatus: CardStatus? = null,
     val selectedCategory: String = CATEGORY_ALL,
+    val isConnectedToMikrotik: Boolean = false,
+    val isSyncing: Boolean = false,
     val isImporting: Boolean = false,
     val statusMessage: String? = null,
     val errorMessage: String? = null
@@ -45,18 +49,20 @@ class UserManagerCardsViewModel(
     init {
         viewModelScope.launch {
             combine(
+                LocalSessionHolder.activeSession,
                 repository.observeAllCards(),
                 repository.observeAllPackages(),
                 repository.observeAllTemplates()
-            ) { cards, pkgs, templates ->
-                Triple(cards, pkgs, templates)
-            }.collect { (cards, pkgs, templates) ->
+            ) { session, cards, pkgs, templates ->
+                CardsBundle(session?.isConnectedToMikrotik == true, cards, pkgs, templates)
+            }.collect { bundle ->
                 _uiState.update { current ->
-                    val validIds = cards.map { it.id }.toSet()
+                    val validIds = bundle.cards.map { it.id }.toSet()
                     val updated = current.copy(
-                        allCards = cards,
-                        packages = pkgs,
-                        templates = templates,
+                        isConnectedToMikrotik = bundle.connected,
+                        allCards = bundle.cards,
+                        packages = bundle.pkgs,
+                        templates = bundle.templates,
                         selectedCardIds = current.selectedCardIds.intersect(validIds)
                     )
                     updated.copy(filteredCards = applyFilters(updated))
@@ -65,9 +71,7 @@ class UserManagerCardsViewModel(
         }
     }
 
-    fun onPrintDateQueryChange(value: String) {
-        _uiState.update { it.copy(printDateQuery = value) }
-    }
+    fun onPrintDateQueryChange(value: String) = _uiState.update { it.copy(printDateQuery = value) }
 
     fun applyPrintDateSearch() {
         _uiState.update { current ->
@@ -127,6 +131,39 @@ class UserManagerCardsViewModel(
         _uiState.update { it.copy(statusMessage = null, errorMessage = null) }
     }
 
+    fun syncFromMikrotik() {
+        val session = LocalSessionHolder.activeSession.value
+        if (session == null || session.hostAddress.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "لا يوجد اتصال فعلي بالمايكروتيك.") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSyncing = true, errorMessage = null) }
+            MikrotikSyncManager.syncFromMikrotik(
+                credentials = session.toCredentials(),
+                loadType = session.loadType,
+                repository = repository,
+                onProgress = { _, _ -> }
+            ).onSuccess { summary ->
+                LocalSessionHolder.updateConnectionStatus(true, summary.systemStatus, null)
+                _uiState.update {
+                    it.copy(
+                        isSyncing = false,
+                        statusMessage = "تم تحديث ${summary.cardsSynced} كرت و ${summary.packagesSynced} باقة من المايكروتيك."
+                    )
+                }
+            }.onFailure { err ->
+                LocalSessionHolder.updateConnectionStatus(false, null, err.localizedMessage)
+                _uiState.update {
+                    it.copy(
+                        isSyncing = false,
+                        errorMessage = err.localizedMessage ?: "تعذرت المزامنة مع المايكروتيك."
+                    )
+                }
+            }
+        }
+    }
+
     fun reAddSelectedCards() {
         val targetCards = getActionTargetCards()
         if (targetCards.isEmpty()) {
@@ -134,12 +171,22 @@ class UserManagerCardsViewModel(
             return
         }
         viewModelScope.launch {
+            val session = LocalSessionHolder.activeSession.value
+            if (session != null && session.isConnectedToMikrotik) {
+                MikrotikSyncManager.pushCardsToMikrotik(
+                    credentials = session.toCredentials(),
+                    loadType = session.loadType,
+                    cards = targetCards,
+                    repository = repository,
+                    onProgress = { }
+                )
+            }
             repository.resetCardsToUnused(targetCards.map { it.id })
                 .onSuccess {
                     _uiState.update {
                         it.copy(
                             selectedCardIds = emptySet(),
-                            statusMessage = "تمت إعادة إضافة ${targetCards.size} كرت بنجاح (غير مستخدم/جاهز للطباعة)."
+                            statusMessage = "تمت إعادة إضافة ${targetCards.size} كرت بنجاح."
                         )
                     }
                 }
@@ -156,12 +203,24 @@ class UserManagerCardsViewModel(
             return
         }
         viewModelScope.launch {
+            val session = LocalSessionHolder.activeSession.value
+            var mikrotikNote = ""
+            if (session != null && session.isConnectedToMikrotik) {
+                val remoteRes = MikrotikSyncManager.deleteCardsOnMikrotik(
+                    credentials = session.toCredentials(),
+                    loadType = session.loadType,
+                    cards = targetCards
+                )
+                if (remoteRes.isSuccess) {
+                    mikrotikNote = " (وحُذف ${remoteRes.getOrDefault(0)} من المايكروتيك)"
+                }
+            }
             repository.deleteCardsByIds(targetCards.map { it.id })
                 .onSuccess {
                     _uiState.update {
                         it.copy(
                             selectedCardIds = emptySet(),
-                            statusMessage = "تم حذف ${targetCards.size} كرت بنجاح."
+                            statusMessage = "تم حذف ${targetCards.size} كرت$mikrotikNote."
                         )
                     }
                 }
@@ -193,11 +252,12 @@ class UserManagerCardsViewModel(
             val state = _uiState.value
             val existingUsernames = state.allCards.map { it.username }.toSet()
             val defaultPkg = state.packages.firstOrNull()
+            val serverAccount = LocalSessionHolder.activeSession.value?.username.orEmpty()
             val result = CardImportParser.parseTextOrCsv(
                 rawContent = rawContent,
-                defaultPackageName = defaultPkg?.name ?: "80",
-                defaultPrice = defaultPkg?.price ?: 100.0,
-                defaultPointOfSale = defaultPkg?.pointOfSale ?: "ether3",
+                defaultPackageName = defaultPkg?.name.orEmpty(),
+                defaultPrice = defaultPkg?.price ?: 0.0,
+                serverAccount = serverAccount,
                 sourceFileName = fileName,
                 existingUsernames = existingUsernames
             )
@@ -253,8 +313,15 @@ class UserManagerCardsViewModel(
                 (card.printedDateKey?.contains(state.appliedPrintDate, ignoreCase = true) == true)
             val matchQuery = state.usernameQuery.isBlank() ||
                 card.username.contains(state.usernameQuery, ignoreCase = true) ||
-                card.pointOfSale.contains(state.usernameQuery, ignoreCase = true)
+                card.packageName.contains(state.usernameQuery, ignoreCase = true)
             matchStatus && matchCategory && matchDate && matchQuery
         }
     }
+
+    private data class CardsBundle(
+        val connected: Boolean,
+        val cards: List<CardEntity>,
+        val pkgs: List<CardPackageEntity>,
+        val templates: List<CardTemplateEntity>
+    )
 }

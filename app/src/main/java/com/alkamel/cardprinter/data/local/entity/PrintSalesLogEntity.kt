@@ -19,7 +19,7 @@ data class PrintSalesLogEntity(
     val unitPrice: Double = 0.0,
     val totalAmount: Double = 0.0,
     val commissionTotal: Double = 0.0,
-    val pointOfSale: String = "ether3",
+    val serverAccount: String = "",
     val downloadLabel: String = "0 MB",
     val downloadMb: Double = 0.0,
     val printMethod: PrintMethod = PrintMethod.PDF_A4_GRID,

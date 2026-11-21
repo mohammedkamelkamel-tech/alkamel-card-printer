@@ -15,11 +15,10 @@ data class PackagesUiState(
     val showEditorDialog: Boolean = false,
     val editingId: Long = 0L,
     val nameInput: String = "",
-    val priceInput: String = "100",
+    val priceInput: String = "",
     val commissionInput: String = "0",
-    val pointOfSaleInput: String = "ether3",
-    val validityInput: String = "يوم واحد",
-    val dataLimitMbInput: String = "512",
+    val validityInput: String = "",
+    val dataLimitMbInput: String = "0",
     val statusMessage: String? = null,
     val errorMessage: String? = null
 )
@@ -45,11 +44,10 @@ class PackagesViewModel(
                 showEditorDialog = true,
                 editingId = 0L,
                 nameInput = "",
-                priceInput = "100",
+                priceInput = "",
                 commissionInput = "0",
-                pointOfSaleInput = "ether3",
-                validityInput = "يوم واحد",
-                dataLimitMbInput = "512"
+                validityInput = "",
+                dataLimitMbInput = "0"
             )
         }
     }
@@ -60,9 +58,8 @@ class PackagesViewModel(
                 showEditorDialog = true,
                 editingId = pkg.id,
                 nameInput = pkg.name,
-                priceInput = pkg.price.toLong().toString(),
+                priceInput = if (pkg.price > 0) pkg.price.toLong().toString() else "",
                 commissionInput = pkg.commission.toLong().toString(),
-                pointOfSaleInput = pkg.pointOfSale,
                 validityInput = pkg.validityLabel,
                 dataLimitMbInput = pkg.dataLimitMb.toLong().toString()
             )
@@ -73,7 +70,6 @@ class PackagesViewModel(
     fun onNameChange(v: String) = _uiState.update { it.copy(nameInput = v) }
     fun onPriceChange(v: String) = _uiState.update { it.copy(priceInput = v.filter { c -> c.isDigit() || c == '.' }) }
     fun onCommissionChange(v: String) = _uiState.update { it.copy(commissionInput = v.filter { c -> c.isDigit() || c == '.' }) }
-    fun onPointOfSaleChange(v: String) = _uiState.update { it.copy(pointOfSaleInput = v) }
     fun onValidityChange(v: String) = _uiState.update { it.copy(validityInput = v) }
     fun onDataLimitChange(v: String) = _uiState.update { it.copy(dataLimitMbInput = v.filter { c -> c.isDigit() || c == '.' }) }
     fun clearMessages() = _uiState.update { it.copy(statusMessage = null, errorMessage = null) }
@@ -89,9 +85,8 @@ class PackagesViewModel(
             val entity = CardPackageEntity(
                 id = s.editingId,
                 name = name,
-                price = s.priceInput.toDoubleOrNull() ?: 100.0,
+                price = s.priceInput.toDoubleOrNull() ?: 0.0,
                 commission = s.commissionInput.toDoubleOrNull() ?: 0.0,
-                pointOfSale = s.pointOfSaleInput.trim().ifBlank { "ether3" },
                 validityLabel = s.validityInput.trim(),
                 dataLimitMb = s.dataLimitMbInput.toDoubleOrNull() ?: 0.0
             )

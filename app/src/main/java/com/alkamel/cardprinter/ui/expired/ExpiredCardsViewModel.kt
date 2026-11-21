@@ -4,7 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.model.CardStatus
+import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
+import com.alkamel.cardprinter.data.session.LocalSessionHolder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,6 +55,14 @@ class ExpiredCardsViewModel(
 
     fun deleteSingleCard(card: CardEntity) {
         viewModelScope.launch {
+            val session = LocalSessionHolder.activeSession.value
+            if (session != null && session.isConnectedToMikrotik) {
+                MikrotikSyncManager.deleteCardsOnMikrotik(
+                    credentials = session.toCredentials(),
+                    loadType = session.loadType,
+                    cards = listOf(card)
+                )
+            }
             repository.deleteCardsByIds(listOf(card.id))
                 .onSuccess {
                     _uiState.update { it.copy(statusMessage = "تم حذف الكرت المنتهي (${card.username}).") }
@@ -73,12 +83,20 @@ class ExpiredCardsViewModel(
     }
 
     fun deleteAllExpired() {
-        val ids = _uiState.value.filteredExpired.map { it.id }
-        if (ids.isEmpty()) return
+        val targets = _uiState.value.filteredExpired
+        if (targets.isEmpty()) return
         viewModelScope.launch {
-            repository.deleteCardsByIds(ids)
+            val session = LocalSessionHolder.activeSession.value
+            if (session != null && session.isConnectedToMikrotik) {
+                MikrotikSyncManager.deleteCardsOnMikrotik(
+                    credentials = session.toCredentials(),
+                    loadType = session.loadType,
+                    cards = targets
+                )
+            }
+            repository.deleteCardsByIds(targets.map { it.id })
                 .onSuccess {
-                    _uiState.update { it.copy(statusMessage = "تم تنظيف وحذف ${ids.size} كرت منتهي بنجاح.") }
+                    _uiState.update { it.copy(statusMessage = "تم تنظيف وحذف ${targets.size} كرت منتهي بنجاح.") }
                 }
                 .onFailure { err ->
                     _uiState.update { it.copy(errorMessage = err.localizedMessage ?: "تعذر الحذف") }
@@ -91,8 +109,7 @@ class ExpiredCardsViewModel(
         if (q.isBlank()) return items
         return items.filter {
             it.username.contains(q, ignoreCase = true) ||
-                it.packageName.contains(q, ignoreCase = true) ||
-                it.pointOfSale.contains(q, ignoreCase = true)
+                it.packageName.contains(q, ignoreCase = true)
         }
     }
 }

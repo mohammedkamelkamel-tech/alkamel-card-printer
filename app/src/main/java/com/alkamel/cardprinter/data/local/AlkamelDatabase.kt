@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
         CardTemplateEntity::class,
         PrintSalesLogEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(AlkamelTypeConverters::class)
@@ -63,6 +63,7 @@ abstract class AlkamelDatabase : RoomDatabase() {
                 AlkamelDatabase::class.java,
                 AlkamelCardPrinterApplication.DATABASE_NAME
             )
+                .fallbackToDestructiveMigration()
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .addCallback(
                     object : Callback() {

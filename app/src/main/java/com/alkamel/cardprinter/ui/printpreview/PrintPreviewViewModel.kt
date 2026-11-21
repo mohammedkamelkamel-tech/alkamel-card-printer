@@ -14,6 +14,7 @@ import com.alkamel.cardprinter.data.preferences.AppSettingsState
 import com.alkamel.cardprinter.data.printing.PdfPrintEngine
 import com.alkamel.cardprinter.data.printing.PdfResult
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
+import com.alkamel.cardprinter.data.session.LocalSessionHolder
 import com.alkamel.cardprinter.data.session.PrintQueueHolder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -163,6 +164,7 @@ class PrintPreviewViewModel(
         val first = cards.first()
         val totalAmount = cards.sumOf { it.price }
         val totalCommission = cards.sumOf { it.commission }
+        val account = first.serverAccount.ifBlank { LocalSessionHolder.activeSession.value?.username.orEmpty() }
         repository.recordSalesLog(
             PrintSalesLogEntity(
                 cardUsername = if (cards.size == 1) first.username else "دفعة ${cards.size} كرت (${first.username})",
@@ -171,7 +173,7 @@ class PrintPreviewViewModel(
                 unitPrice = first.price,
                 totalAmount = totalAmount,
                 commissionTotal = totalCommission,
-                pointOfSale = first.pointOfSale.ifBlank { "ether3" },
+                serverAccount = account,
                 downloadLabel = "0 MB",
                 downloadMb = 0.0,
                 printMethod = method,

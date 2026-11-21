@@ -25,6 +25,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Assessment
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CreditCard
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.MonetizationOn
@@ -32,6 +34,7 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PersonOff
 import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.Print
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -40,6 +43,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -91,7 +95,7 @@ fun DashboardScreen(
         listOf(
             DashboardTile(
                 title = "طباعة كروت",
-                subtitle = "توليد وإضافة وطباعة A4",
+                subtitle = "توليد وإضافة للمايكروتيك وطباعة A4",
                 icon = Icons.Rounded.Print,
                 accentColor = ext.royalActionBlue,
                 route = AppRoutes.CARD_GENERATION
@@ -105,7 +109,7 @@ fun DashboardScreen(
             ),
             DashboardTile(
                 title = "الباقات",
-                subtitle = "إدارة الأسعار والفئات",
+                subtitle = "باقات المايكروتيك والأسعار",
                 icon = Icons.Rounded.Folder,
                 accentColor = ext.reportAmberGold,
                 route = AppRoutes.PACKAGES
@@ -126,7 +130,7 @@ fun DashboardScreen(
             ),
             DashboardTile(
                 title = "التقارير",
-                subtitle = "إحصائيات وتصدير PDF",
+                subtitle = "إحصائيات فعلية وتصدير PDF",
                 icon = Icons.Rounded.Assessment,
                 accentColor = ext.reportPurple,
                 route = AppRoutes.REPORTS
@@ -175,30 +179,33 @@ fun DashboardScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
                         text = state.sessionLoadLabel,
-                        style = MaterialTheme.typography.labelLarge,
+                        style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = if (state.isConnectedToMikrotik) ext.voucherGreen else ext.destructivePink,
+                        modifier = Modifier.weight(1f)
                     )
-                    LinearProgressIndicator(
-                        progress = { (state.sessionLoadProgress / 100f).coerceIn(0f, 1f) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(10.dp)
-                            .clip(RoundedCornerShape(8.dp)),
-                        color = ext.royalActionBlue,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                        strokeCap = StrokeCap.Round
-                    )
-                    Text(
-                        text = "${state.sessionLoadProgress}%",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = ext.royalActionBlue
-                    )
+                    if (state.isLoadingSessions || state.sessionLoadProgress > 0) {
+                        LinearProgressIndicator(
+                            progress = { (state.sessionLoadProgress / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .width(92.dp)
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            color = ext.royalActionBlue,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                            strokeCap = StrokeCap.Round
+                        )
+                        Text(
+                            text = "${state.sessionLoadProgress}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = ext.royalActionBlue
+                        )
+                    }
                 }
             }
         }
@@ -208,7 +215,7 @@ fun DashboardScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Top Dark Header with 4 Amber-Ringed Status Circles
+            // Top Dark Header showing ONLY REAL MikroTik Telemetry ("--" when disconnected)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -216,7 +223,8 @@ fun DashboardScreen(
                         color = ext.headerNavy,
                         shape = RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp)
                     )
-                    .padding(horizontal = 12.dp, vertical = 18.dp)
+                    .padding(horizontal = 12.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -225,24 +233,80 @@ fun DashboardScreen(
                 ) {
                     MetricGaugeCircle(
                         label = "المعالج",
-                        valueText = "${state.cpuPercent}%",
-                        waveFillFraction = state.cpuPercent / 100f
+                        valueText = state.cpuPercent?.let { "$it%" } ?: "--",
+                        waveFillFraction = state.cpuPercent?.let { it / 100f } ?: 0f,
+                        isLive = state.isConnectedToMikrotik
                     )
                     MetricGaugeCircle(
                         label = "المتصلين",
-                        valueText = state.activeConnectionsCount.toString(),
-                        waveFillFraction = 0f
+                        valueText = state.activeConnectionsCount?.toString() ?: "--",
+                        waveFillFraction = 0f,
+                        isLive = state.isConnectedToMikrotik
                     )
                     MetricGaugeCircle(
                         label = "مدة التشغيل",
-                        valueText = state.uptimeDisplay,
-                        waveFillFraction = 0f
+                        valueText = state.uptimeDisplay ?: "--",
+                        waveFillFraction = 0f,
+                        isLive = state.isConnectedToMikrotik
                     )
                     MetricGaugeCircle(
                         label = "التحميل",
-                        valueText = state.todayDownloadDisplay,
-                        waveFillFraction = 0f
+                        valueText = state.todayDownloadDisplay ?: "--",
+                        waveFillFraction = 0f,
+                        isLive = state.isConnectedToMikrotik
                     )
+                }
+
+                // Real Connection Status Pill inside header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            if (state.isConnectedToMikrotik) Color(0xFF1B5E20).copy(alpha = 0.45f)
+                            else Color(0xFFB71C1C).copy(alpha = 0.45f)
+                        )
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = if (state.isConnectedToMikrotik) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
+                            contentDescription = null,
+                            tint = if (state.isConnectedToMikrotik) Color(0xFF81C784) else Color(0xFFFF8A80),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = if (state.isConnectedToMikrotik) {
+                                "متصل بالمايكروتيك (${state.hostPortLabel})" +
+                                    if (state.routerOsVersion.isNotBlank()) " • RouterOS ${state.routerOsVersion}" else ""
+                            } else {
+                                state.connectionError ?: "غير متصل بالمايكروتيك — اضغط تحديث لإعادة المحاولة"
+                            },
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2
+                        )
+                    }
+
+                    IconButton(
+                        onClick = viewModel::refreshMikrotikNow,
+                        enabled = !state.isLoadingSessions,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = "تحديث ومزامنة المايكروتيك",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
 
@@ -250,7 +314,7 @@ fun DashboardScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -271,7 +335,7 @@ fun DashboardScreen(
                 }
 
                 Text(
-                    text = "${state.networkName} • ${state.activeUser}",
+                    text = "${state.networkName}${if (state.activeUser.isNotBlank()) " • ${state.activeUser}" else ""}",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.SemiBold
@@ -338,7 +402,7 @@ fun DashboardScreen(
         }
     }
 
-    // Fast Session Loading Modal ("هل تريد تحميل الجلسات بشكل سريع؟")
+    // Real Fast Session Sync Prompt (only when connected to MikroTik)
     if (state.showFastSessionPrompt) {
         Dialog(onDismissRequest = viewModel::dismissFastSessionPrompt) {
             Card(
@@ -368,7 +432,7 @@ fun DashboardScreen(
                     }
                     Spacer(modifier = Modifier.height(18.dp))
                     Text(
-                        text = "هل تريد تحميل الجلسات بشكل سريع؟",
+                        text = "هل تريد جلب الباقات والكروت والجلسات من المايكروتيك الآن؟",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
@@ -428,8 +492,17 @@ fun DashboardScreen(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
                 )
                 ListItem(
+                    headlineContent = { Text("مزامنة فورية مع المايكروتيك", fontWeight = FontWeight.Bold) },
+                    supportingContent = { Text("تحديث حالة المعالج والمتصلين والباقات والكروت الحقيقية") },
+                    leadingContent = { Icon(Icons.Rounded.Refresh, contentDescription = null, tint = ext.voucherGreen) },
+                    modifier = Modifier.clickable {
+                        showQuickActionsSheet = false
+                        viewModel.refreshMikrotikNow()
+                    }
+                )
+                ListItem(
                     headlineContent = { Text("توليد وطباعة كروت جديدة (A4)", fontWeight = FontWeight.Bold) },
-                    supportingContent = { Text("إنشاء دفعة كروت جديدة وإضافتها للسيرفر وطباعتها") },
+                    supportingContent = { Text("إنشاء دفعة كروت وإضافتها فعلياً إلى المايكروتيك وطباعتها") },
                     leadingContent = { Icon(Icons.Rounded.Print, contentDescription = null, tint = ext.royalActionBlue) },
                     modifier = Modifier.clickable {
                         showQuickActionsSheet = false
@@ -448,7 +521,7 @@ fun DashboardScreen(
                 ListItem(
                     headlineContent = { Text("معاينة طباعة A4", fontWeight = FontWeight.Bold) },
                     supportingContent = { Text("استعراض شبكة الكروت على ورق A4 وتصدير PDF") },
-                    leadingContent = { Icon(Icons.Rounded.PictureAsPdf, contentDescription = null, tint = ext.voucherGreen) },
+                    leadingContent = { Icon(Icons.Rounded.PictureAsPdf, contentDescription = null, tint = ext.reportTeal) },
                     modifier = Modifier.clickable {
                         showQuickActionsSheet = false
                         onNavigate(AppRoutes.PRINT_PREVIEW)
@@ -472,7 +545,8 @@ fun DashboardScreen(
 private fun MetricGaugeCircle(
     label: String,
     valueText: String,
-    waveFillFraction: Float
+    waveFillFraction: Float,
+    isLive: Boolean
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
@@ -481,16 +555,20 @@ private fun MetricGaugeCircle(
             color = Color(0xFFCBD5E1),
             fontWeight = FontWeight.SemiBold
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
         Box(
             modifier = Modifier
-                .size(76.dp)
+                .size(74.dp)
                 .clip(CircleShape)
-                .background(Color(0xFFE2E8F0))
-                .border(width = 4.dp, color = Color(0xFFD9820B), shape = CircleShape),
+                .background(if (isLive) Color(0xFFE2E8F0) else Color(0xFF1E293B))
+                .border(
+                    width = 4.dp,
+                    color = if (isLive) Color(0xFFD9820B) else Color(0xFF475569),
+                    shape = CircleShape
+                ),
             contentAlignment = Alignment.Center
         ) {
-            if (waveFillFraction > 0f) {
+            if (isLive && waveFillFraction > 0f) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val h = size.height
                     val w = size.width
@@ -508,9 +586,9 @@ private fun MetricGaugeCircle(
             }
             Text(
                 text = valueText,
-                color = Color(0xFF0F172A),
+                color = if (isLive) Color(0xFF0F172A) else Color(0xFF94A3B8),
                 fontWeight = FontWeight.ExtraBold,
-                fontSize = if (valueText.length > 5) 12.sp else 16.sp,
+                fontSize = if (valueText.length > 5) 11.sp else 15.sp,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 4.dp)
             )

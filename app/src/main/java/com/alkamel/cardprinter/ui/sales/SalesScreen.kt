@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -70,7 +69,6 @@ fun SalesScreen(
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Date Range Selector Card
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -134,7 +132,6 @@ fun SalesScreen(
                 }
             }
 
-            // Summary Banner
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = ext.reportBlue),
@@ -237,7 +234,7 @@ private fun SaleOperationCard(log: PrintSalesLogEntity) {
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "الباقة: ${log.packageName} • العدد: ${log.cardsCount}",
+                            text = "الباقة: ${log.packageName.ifBlank { "-" }} • العدد: ${log.cardsCount}",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -258,7 +255,7 @@ private fun SaleOperationCard(log: PrintSalesLogEntity) {
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "المنفذ: ${log.pointOfSale.ifBlank { "ether3" }}",
+                    text = "الحساب: ${log.serverAccount.ifBlank { "-" }}",
                     style = MaterialTheme.typography.labelMedium,
                     color = ext.royalActionBlue,
                     fontWeight = FontWeight.SemiBold

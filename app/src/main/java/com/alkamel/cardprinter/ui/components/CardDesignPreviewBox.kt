@@ -37,7 +37,6 @@ import kotlin.math.roundToInt
 enum class DesignerElement(val arabicLabel: String) {
     USERNAME("اسم المستخدم"),
     PASSWORD("كلمة السر"),
-    POINT_OF_SALE("نقطة البيع"),
     QR_CODE("رمز QR")
 }
 
@@ -50,7 +49,6 @@ fun CardDesignPreviewBox(
     template: CardTemplateEntity,
     sampleUsername: String,
     samplePassword: String,
-    samplePointOfSale: String,
     selectedElement: DesignerElement?,
     isInteractive: Boolean,
     onElementDragged: (DesignerElement, Float, Float) -> Unit,
@@ -123,21 +121,6 @@ fun CardDesignPreviewBox(
                 isSelected = selectedElement == DesignerElement.PASSWORD,
                 isInteractive = isInteractive,
                 onDrag = { dx, dy -> onElementDragged(DesignerElement.PASSWORD, dx / widthPx, dy / heightPx) }
-            )
-        }
-
-        if (template.showPointOfSale && samplePointOfSale.isNotBlank()) {
-            DraggableOverlayText(
-                text = samplePointOfSale,
-                relX = template.pointOfSaleX,
-                relY = template.pointOfSaleY,
-                widthPx = widthPx,
-                heightPx = heightPx,
-                color = textColor,
-                fontSizeSp = (scaledFontSp * 0.7f).coerceAtLeast(6f),
-                isSelected = selectedElement == DesignerElement.POINT_OF_SALE,
-                isInteractive = isInteractive,
-                onDrag = { dx, dy -> onElementDragged(DesignerElement.POINT_OF_SALE, dx / widthPx, dy / heightPx) }
             )
         }
 

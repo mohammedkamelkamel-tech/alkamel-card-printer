@@ -46,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.alkamel.cardprinter.ui.components.AlkamelTopHeader
 import com.alkamel.cardprinter.ui.theme.AlkamelTheme
@@ -88,67 +89,87 @@ fun PackagesScreen(
             }
         }
     ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
-            contentPadding = PaddingValues(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(state.packages, key = { it.id }) { pkg ->
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+        if (state.packages.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "لا توجد باقات حالياً.\nقم بالربط بسيرفر المايكروتيك ومزامنة الباقات تلقائياً أو أضف باقة مطابقة لاسم الـ Profile في المايكروتيك عبر زر (+).",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentPadding = PaddingValues(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(state.packages, key = { it.id }) { pkg ->
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.weight(1f)
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(46.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(ext.reportAmberGold.copy(alpha = 0.16f)),
-                                contentAlignment = Alignment.Center
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Icon(Icons.Rounded.Folder, contentDescription = null, tint = ext.reportAmberGold)
+                                Box(
+                                    modifier = Modifier
+                                        .size(46.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(ext.reportAmberGold.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Rounded.Folder, contentDescription = null, tint = ext.reportAmberGold)
+                                }
+                                Column {
+                                    Text(
+                                        text = "باقة ${pkg.name}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "السعر: ${pkg.price.toLong()} ريال • العمولة: ${pkg.commission.toLong()} ريال",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = ext.voucherGreen,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    if (pkg.validityLabel.isNotBlank() || pkg.dataLimitMb > 0) {
+                                        Text(
+                                            text = "الصلاحية: ${pkg.validityLabel.ifBlank { "-" }}" +
+                                                if (pkg.dataLimitMb > 0) " • الحجم: ${pkg.dataLimitMb.toLong()} MB" else "",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
                             }
-                            Column {
-                                Text(
-                                    text = "باقة ${pkg.name}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "السعر: ${pkg.price.toLong()} ريال • العمولة: ${pkg.commission.toLong()} ريال",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = ext.voucherGreen,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    text = "المنفذ: ${pkg.pointOfSale} • الصلاحية: ${pkg.validityLabel.ifBlank { "-" }}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
 
-                        Row {
-                            IconButton(onClick = { viewModel.openEditDialog(pkg) }) {
-                                Icon(Icons.Rounded.Edit, contentDescription = "تعديل", tint = ext.royalActionBlue)
-                            }
-                            IconButton(onClick = { viewModel.deletePackage(pkg) }) {
-                                Icon(Icons.Rounded.DeleteOutline, contentDescription = "حذف", tint = ext.destructivePink)
+                            Row {
+                                IconButton(onClick = { viewModel.openEditDialog(pkg) }) {
+                                    Icon(Icons.Rounded.Edit, contentDescription = "تعديل", tint = ext.royalActionBlue)
+                                }
+                                IconButton(onClick = { viewModel.deletePackage(pkg) }) {
+                                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "حذف", tint = ext.destructivePink)
+                                }
                             }
                         }
                     }
@@ -171,7 +192,7 @@ fun PackagesScreen(
                     OutlinedTextField(
                         value = state.nameInput,
                         onValueChange = viewModel::onNameChange,
-                        label = { Text("اسم الباقة (مثال: 80 أو 100 ريال)") },
+                        label = { Text("اسم الباقة (Profile في المايكروتيك)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -179,7 +200,7 @@ fun PackagesScreen(
                         OutlinedTextField(
                             value = state.priceInput,
                             onValueChange = viewModel::onPriceChange,
-                            label = { Text("السعر") },
+                            label = { Text("السعر (ريال)") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             singleLine = true,
                             modifier = Modifier.weight(1f)
@@ -193,13 +214,6 @@ fun PackagesScreen(
                             modifier = Modifier.weight(1f)
                         )
                     }
-                    OutlinedTextField(
-                        value = state.pointOfSaleInput,
-                        onValueChange = viewModel::onPointOfSaleChange,
-                        label = { Text("نقطة البيع / المنفذ") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = state.validityInput,

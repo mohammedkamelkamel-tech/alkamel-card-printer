@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alkamel.cardprinter.data.local.entity.SavedNetworkEntity
 import com.alkamel.cardprinter.data.local.model.NetworkLoadType
+import com.alkamel.cardprinter.data.mikrotik.MikrotikCredentials
+import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
 import com.alkamel.cardprinter.data.session.ActiveSession
 import com.alkamel.cardprinter.data.session.LocalSessionHolder
@@ -14,15 +16,15 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class LoginUiState(
-    val networkName: String = "شبكة الكامل نت",
-    val hostAddress: String = "192.168.88.1",
+    val networkName: String = "",
+    val hostAddress: String = "",
     val port: String = "8728",
     val username: String = "admin",
     val password: String = "",
     val selectedLoadType: NetworkLoadType = NetworkLoadType.LOAD_USER_MANAGER,
     val savedNetworks: List<SavedNetworkEntity> = emptyList(),
     val showSavedNetworksSheet: Boolean = false,
-    val isSubmitting: Boolean = false,
+    val isConnecting: Boolean = false,
     val errorMessage: String? = null,
     val statusMessage: String? = null
 )
@@ -77,6 +79,7 @@ class LoginViewModel(
                 password = network.password,
                 selectedLoadType = network.loadType,
                 showSavedNetworksSheet = false,
+                errorMessage = null,
                 statusMessage = "تم اختيار الشبكة: ${network.networkName}"
             )
         }
@@ -84,8 +87,12 @@ class LoginViewModel(
 
     fun saveCurrentNetwork() {
         val state = _uiState.value
-        val host = state.hostAddress.trim().ifBlank { "192.168.88.1" }
-        val name = state.networkName.trim().ifBlank { "شبكة الكامل ($host)" }
+        val host = state.hostAddress.trim()
+        if (host.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "يرجى إدخال عنوان سيرفر المايكروتيك (IP / Host) أولاً.") }
+            return
+        }
+        val name = state.networkName.trim().ifBlank { "شبكة ($host)" }
         val parsedPort = state.port.toIntOrNull()?.coerceIn(1, 65535) ?: 8728
         val user = state.username.trim().ifBlank { "admin" }
 
@@ -106,7 +113,7 @@ class LoginViewModel(
             )
             repository.saveNetwork(entity)
                 .onSuccess {
-                    _uiState.update { it.copy(statusMessage = "تم حفظ الشبكة ($name) محلياً بنجاح") }
+                    _uiState.update { it.copy(statusMessage = "تم حفظ بيانات الشبكة ($name) بنجاح.") }
                 }
                 .onFailure { err ->
                     _uiState.update { it.copy(errorMessage = err.localizedMessage ?: "تعذر حفظ الشبكة") }
@@ -123,43 +130,114 @@ class LoginViewModel(
         }
     }
 
-    fun loginLocally(onSuccess: () -> Unit) {
+    fun connectToMikrotikAndLogin(onSuccess: () -> Unit) {
         val state = _uiState.value
-        val host = state.hostAddress.trim().ifBlank { "192.168.88.1" }
-        val user = state.username.trim().ifBlank { "admin" }
-        val parsedPort = state.port.toIntOrNull()?.coerceIn(1, 65535) ?: 8728
-        val netName = state.networkName.trim().ifBlank { "شبكة الكامل نت" }
+        val host = state.hostAddress.trim()
+        if (host.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "يرجى إدخال عنوان سيرفر المايكروتيك (IP / Host).") }
+            return
+        }
+        val parsedPort = state.port.toIntOrNull()?.takeIf { it in 1..65535 }
+        if (parsedPort == null) {
+            _uiState.update { it.copy(errorMessage = "رقم المنفذ (Port) غير صحيح.") }
+            return
+        }
+        val user = state.username.trim()
+        if (user.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "يرجى إدخال اسم المستخدم للمايكروتيك.") }
+            return
+        }
+        val netName = state.networkName.trim().ifBlank { host }
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isSubmitting = true, errorMessage = null) }
-            val existing = state.savedNetworks.firstOrNull {
-                it.hostAddress.equals(host, ignoreCase = true) && it.username.equals(user, ignoreCase = true)
-            }
-            repository.saveNetwork(
-                SavedNetworkEntity(
-                    id = existing?.id ?: 0L,
-                    networkName = netName,
-                    hostAddress = host,
-                    port = parsedPort,
-                    username = user,
-                    password = state.password,
-                    loadType = state.selectedLoadType,
-                    isDefault = true,
-                    lastUsedAt = System.currentTimeMillis()
-                )
+            _uiState.update { it.copy(isConnecting = true, errorMessage = null, statusMessage = null) }
+
+            val credentials = MikrotikCredentials(
+                host = host,
+                port = parsedPort,
+                username = user,
+                password = state.password
             )
+            val testResult = MikrotikSyncManager.testConnectionAndFetchStatus(credentials)
+
+            if (!testResult.isConnected || testResult.systemStatus == null) {
+                _uiState.update {
+                    it.copy(
+                        isConnecting = false,
+                        errorMessage = testResult.errorMessage
+                            ?: "فشل الاتصال بالمايكروتيك ($host:$parsedPort). تأكد من الشبكة وبيانات الدخول."
+                    )
+                }
+                return@launch
+            }
+
+            persistNetworkRecord(state, netName, host, parsedPort, user)
+
             LocalSessionHolder.setSession(
                 ActiveSession(
                     networkName = netName,
                     hostAddress = host,
                     port = parsedPort,
                     username = user,
+                    password = state.password,
                     loadType = state.selectedLoadType,
+                    isConnectedToMikrotik = true,
+                    connectionError = null,
+                    systemStatus = testResult.systemStatus,
                     shouldPromptFastSessionLoad = state.selectedLoadType != NetworkLoadType.NO_LOAD
                 )
             )
-            _uiState.update { it.copy(isSubmitting = false) }
+            _uiState.update { it.copy(isConnecting = false) }
             onSuccess()
         }
+    }
+
+    fun enterOfflineViewMode(onSuccess: () -> Unit) {
+        val state = _uiState.value
+        val host = state.hostAddress.trim()
+        val parsedPort = state.port.toIntOrNull()?.coerceIn(1, 65535) ?: 8728
+        val user = state.username.trim()
+        val netName = state.networkName.trim().ifBlank { host.ifBlank { "وضع بدون اتصال" } }
+
+        LocalSessionHolder.setSession(
+            ActiveSession(
+                networkName = netName,
+                hostAddress = host,
+                port = parsedPort,
+                username = user,
+                password = state.password,
+                loadType = state.selectedLoadType,
+                isConnectedToMikrotik = false,
+                connectionError = "غير متصل بسيرفر المايكروتيك حالياً — القراءات المباشرة غير متاحة حتى يتم الربط.",
+                systemStatus = null,
+                shouldPromptFastSessionLoad = false
+            )
+        )
+        onSuccess()
+    }
+
+    private suspend fun persistNetworkRecord(
+        state: LoginUiState,
+        netName: String,
+        host: String,
+        port: Int,
+        user: String
+    ) {
+        val existing = state.savedNetworks.firstOrNull {
+            it.hostAddress.equals(host, ignoreCase = true) && it.username.equals(user, ignoreCase = true)
+        }
+        repository.saveNetwork(
+            SavedNetworkEntity(
+                id = existing?.id ?: 0L,
+                networkName = netName,
+                hostAddress = host,
+                port = port,
+                username = user,
+                password = state.password,
+                loadType = state.selectedLoadType,
+                isDefault = true,
+                lastUsedAt = System.currentTimeMillis()
+            )
+        )
     }
 }

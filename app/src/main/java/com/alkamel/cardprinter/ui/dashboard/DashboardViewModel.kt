@@ -3,9 +3,9 @@ package com.alkamel.cardprinter.ui.dashboard
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alkamel.cardprinter.data.local.model.CardStatus
+import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
 import com.alkamel.cardprinter.data.session.LocalSessionHolder
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,19 +14,23 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class DashboardUiState(
-    val networkName: String = "شبكة الكامل نت",
-    val activeUser: String = "admin",
-    val cpuPercent: Int = 21,
-    val activeConnectionsCount: Int = 113,
-    val uptimeDisplay: String = "11h4m43s",
-    val todayDownloadDisplay: String = "0",
+    val networkName: String = "",
+    val hostPortLabel: String = "",
+    val activeUser: String = "",
+    val routerOsVersion: String = "",
+    val isConnectedToMikrotik: Boolean = false,
+    val connectionError: String? = null,
+    val cpuPercent: Int? = null,
+    val activeConnectionsCount: Int? = null,
+    val uptimeDisplay: String? = null,
+    val todayDownloadDisplay: String? = null,
     val totalCardsCount: Int = 0,
     val unusedCardsCount: Int = 0,
     val expiredCardsCount: Int = 0,
     val showFastSessionPrompt: Boolean = false,
     val isLoadingSessions: Boolean = false,
     val sessionLoadProgress: Int = 0,
-    val sessionLoadLabel: String = "جاهز للعمل المحلي"
+    val sessionLoadLabel: String = "غير متصل بالمايكروتيك"
 )
 
 class DashboardViewModel(
@@ -37,50 +41,43 @@ class DashboardViewModel(
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
 
     init {
-        val session = LocalSessionHolder.activeSession.value
-        if (session != null) {
-            _uiState.update {
-                it.copy(
-                    networkName = session.networkName,
-                    activeUser = session.username,
-                    showFastSessionPrompt = session.shouldPromptFastSessionLoad
-                )
-            }
-        }
-
         viewModelScope.launch {
             combine(
-                repository.observeAllCards(),
-                repository.observeAllSalesLogs()
-            ) { cards, logs ->
-                val usedCount = cards.count { it.status == CardStatus.USED }
-                val unusedCount = cards.count { it.status == CardStatus.UNUSED }
-                val expiredCount = cards.count { it.status == CardStatus.EXPIRED }
-                val totalDownloadMb = logs.sumOf { it.downloadMb } + cards.sumOf { it.dataUsageMb }
-                val downloadLabel = when {
-                    totalDownloadMb >= 1024.0 -> String.format("%.1fG", totalDownloadMb / 1024.0)
-                    totalDownloadMb > 0.0 -> "${totalDownloadMb.toInt()}M"
-                    else -> "0"
+                LocalSessionHolder.activeSession,
+                repository.observeAllCards()
+            ) { session, cards ->
+                session to cards
+            }.collect { (session, cards) ->
+                val status = session?.systemStatus
+                val connected = session?.isConnectedToMikrotik == true && status != null
+                val hostLabel = if (session != null && session.hostAddress.isNotBlank()) {
+                    "${session.hostAddress}:${session.port}"
+                } else {
+                    "غير محدد"
                 }
-                val cpuVal = (14 + (cards.size % 18)).coerceIn(12, 39)
-                val activeConn = (usedCount + 12).coerceAtLeast(usedCount)
-                DashboardStatsSnapshot(
-                    total = cards.size,
-                    unused = unusedCount,
-                    expired = expiredCount,
-                    activeConnections = activeConn,
-                    cpu = cpuVal,
-                    download = downloadLabel
-                )
-            }.collect { snap ->
-                _uiState.update {
-                    it.copy(
-                        totalCardsCount = snap.total,
-                        unusedCardsCount = snap.unused,
-                        expiredCardsCount = snap.expired,
-                        activeConnectionsCount = snap.activeConnections,
-                        cpuPercent = snap.cpu,
-                        todayDownloadDisplay = snap.download
+
+                _uiState.update { current ->
+                    current.copy(
+                        networkName = session?.networkName?.ifBlank { hostLabel } ?: "غير متصل",
+                        hostPortLabel = hostLabel,
+                        activeUser = session?.username.orEmpty(),
+                        routerOsVersion = status?.routerOsVersion.orEmpty(),
+                        isConnectedToMikrotik = connected,
+                        connectionError = session?.connectionError,
+                        cpuPercent = if (connected) status?.cpuLoadPercent else null,
+                        activeConnectionsCount = if (connected) status?.activeConnectionsCount else null,
+                        uptimeDisplay = if (connected) status?.uptimeDisplay else null,
+                        todayDownloadDisplay = if (connected) status?.totalDownloadDisplay else null,
+                        totalCardsCount = cards.size,
+                        unusedCardsCount = cards.count { it.status == CardStatus.UNUSED },
+                        expiredCardsCount = cards.count { it.status == CardStatus.EXPIRED },
+                        showFastSessionPrompt = current.showFastSessionPrompt ||
+                            (connected && session?.shouldPromptFastSessionLoad == true),
+                        sessionLoadLabel = when {
+                            current.isLoadingSessions -> current.sessionLoadLabel
+                            connected -> "متصل بالمايكروتيك ($hostLabel)"
+                            else -> "غير متصل بالمايكروتيك — لا توجد قراءات مباشرة"
+                        }
                     )
                 }
             }
@@ -89,48 +86,87 @@ class DashboardViewModel(
 
     fun dismissFastSessionPrompt() {
         LocalSessionHolder.markFastSessionPromptHandled()
-        _uiState.update {
-            it.copy(
-                showFastSessionPrompt = false,
-                isLoadingSessions = false,
-                sessionLoadProgress = 100,
-                sessionLoadLabel = "تم التحميل المحلي بنجاح"
-            )
-        }
+        _uiState.update { it.copy(showFastSessionPrompt = false) }
     }
 
     fun startFastSessionLoad() {
         LocalSessionHolder.markFastSessionPromptHandled()
+        _uiState.update { it.copy(showFastSessionPrompt = false) }
+        syncRealDataFromMikrotik()
+    }
+
+    fun refreshMikrotikNow() {
+        syncRealDataFromMikrotik()
+    }
+
+    private fun syncRealDataFromMikrotik() {
+        val session = LocalSessionHolder.activeSession.value
+        if (session == null || session.hostAddress.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    isConnectedToMikrotik = false,
+                    connectionError = "لا توجد بيانات اتصال بالمايكروتيك. يرجى تسجيل الدخول أولاً.",
+                    sessionLoadLabel = "غير متصل بالمايكروتيك",
+                    sessionLoadProgress = 0
+                )
+            }
+            return
+        }
+        if (_uiState.value.isLoadingSessions) return
+
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
-                    showFastSessionPrompt = false,
                     isLoadingSessions = true,
-                    sessionLoadProgress = 11,
-                    sessionLoadLabel = "تحميل الجلسات"
+                    sessionLoadProgress = 5,
+                    sessionLoadLabel = "جاري الاتصال بالمايكروتيك...",
+                    connectionError = null
                 )
             }
-            val steps = listOf(11, 24, 38, 52, 67, 81, 93, 100)
-            for (step in steps) {
-                _uiState.update { it.copy(sessionLoadProgress = step) }
-                delay(180L)
-            }
-            _uiState.update {
-                it.copy(
-                    isLoadingSessions = false,
-                    sessionLoadProgress = 100,
-                    sessionLoadLabel = "اكتمل تحميل الجلسات (100%)"
+
+            val result = MikrotikSyncManager.syncFromMikrotik(
+                credentials = session.toCredentials(),
+                loadType = session.loadType,
+                repository = repository,
+                onProgress = { percent, label ->
+                    _uiState.update {
+                        it.copy(
+                            sessionLoadProgress = percent,
+                            sessionLoadLabel = label
+                        )
+                    }
+                }
+            )
+
+            result.onSuccess { summary ->
+                LocalSessionHolder.updateConnectionStatus(
+                    isConnected = true,
+                    systemStatus = summary.systemStatus,
+                    errorMessage = null
                 )
+                _uiState.update {
+                    it.copy(
+                        isLoadingSessions = false,
+                        sessionLoadProgress = 100,
+                        sessionLoadLabel = "تمت المزامنة: ${summary.cardsSynced} كرت • ${summary.packagesSynced} باقة"
+                    )
+                }
+            }.onFailure { err ->
+                val msg = err.localizedMessage ?: "تعذر الاتصال بسيرفر المايكروتيك."
+                LocalSessionHolder.updateConnectionStatus(
+                    isConnected = false,
+                    systemStatus = null,
+                    errorMessage = msg
+                )
+                _uiState.update {
+                    it.copy(
+                        isLoadingSessions = false,
+                        sessionLoadProgress = 0,
+                        connectionError = msg,
+                        sessionLoadLabel = "فشل الاتصال بالمايكروتيك"
+                    )
+                }
             }
         }
     }
-
-    private data class DashboardStatsSnapshot(
-        val total: Int,
-        val unused: Int,
-        val expired: Int,
-        val activeConnections: Int,
-        val cpu: Int,
-        val download: String
-    )
 }

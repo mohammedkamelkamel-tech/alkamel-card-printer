@@ -15,7 +15,7 @@ object CardImportParser {
         rawContent: String,
         defaultPackageName: String,
         defaultPrice: Double,
-        defaultPointOfSale: String,
+        serverAccount: String,
         sourceFileName: String,
         existingUsernames: Set<String>
     ): CardImportResult {
@@ -47,7 +47,6 @@ object CardImportParser {
             val password = parts.getOrNull(1).orEmpty()
             val pkg = parts.getOrNull(2)?.ifBlank { defaultPackageName } ?: defaultPackageName
             val price = parts.getOrNull(3)?.toDoubleOrNull() ?: defaultPrice
-            val pos = parts.getOrNull(4)?.ifBlank { defaultPointOfSale } ?: defaultPointOfSale
 
             cards.add(
                 CardEntity(
@@ -55,7 +54,7 @@ object CardImportParser {
                     password = password,
                     packageName = pkg,
                     price = price,
-                    pointOfSale = pos,
+                    serverAccount = serverAccount,
                     status = CardStatus.UNUSED,
                     sourceFileName = sourceFileName,
                     createdAt = now + cards.size

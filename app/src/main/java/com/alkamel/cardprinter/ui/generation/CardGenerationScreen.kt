@@ -23,7 +23,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ExitToApp
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -84,20 +87,7 @@ fun CardGenerationScreen(
     val ext = AlkamelTheme.extendedColors
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var accountExpanded by remember { mutableStateOf(false) }
     var packageExpanded by remember { mutableStateOf(false) }
-    var posExpanded by remember { mutableStateOf(false) }
-
-    val accountOptions = remember(state.accountName) {
-        listOf(state.accountName, "admin", "manager").distinct().filter { it.isNotBlank() }
-    }
-    val posOptions = remember(state.packages, state.pointOfSale) {
-        (listOf("ether3", "ether4", "ether6", "نقطة السوق", "الفرع الرئيسي") +
-            state.packages.map { it.pointOfSale } + state.pointOfSale)
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .distinct()
-    }
 
     LaunchedEffect(state.statusMessage, state.errorMessage) {
         val msg = state.errorMessage ?: state.statusMessage
@@ -143,6 +133,42 @@ fun CardGenerationScreen(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // MikroTik Connection Status Banner
+            item {
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (state.isConnectedToMikrotik) ext.voucherGreen.copy(alpha = 0.14f)
+                        else ext.destructivePink.copy(alpha = 0.14f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (state.isConnectedToMikrotik) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
+                            contentDescription = null,
+                            tint = if (state.isConnectedToMikrotik) ext.voucherGreen else ext.destructivePink
+                        )
+                        Text(
+                            text = if (state.isConnectedToMikrotik) {
+                                "متصل بالمايكروتيك (${state.mikrotikHostLabel}) • الحساب: ${state.accountName}"
+                            } else {
+                                "غير متصل بالمايكروتيك — لن تتم الإضافة للسيرفر حتى يتم الربط الفعلي بالمايكروتيك"
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = if (state.isConnectedToMikrotik) ext.voucherGreen else ext.destructivePink
+                        )
+                    }
+                }
+            }
+
             item {
                 Card(
                     shape = RoundedCornerShape(18.dp),
@@ -154,45 +180,23 @@ fun CardGenerationScreen(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // Account Selector (admin)
-                        ExposedDropdownMenuBox(
-                            expanded = accountExpanded,
-                            onExpandedChange = { accountExpanded = !accountExpanded }
-                        ) {
-                            OutlinedTextField(
-                                value = state.accountName,
-                                onValueChange = {},
-                                readOnly = true,
-                                label = { Text("الحساب / السيرفر") },
-                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = accountExpanded) },
-                                shape = RoundedCornerShape(12.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = ext.inputContainer,
-                                    unfocusedContainerColor = ext.inputContainer,
-                                    focusedTextColor = ext.inputText,
-                                    unfocusedTextColor = ext.inputText
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                            )
-                            ExposedDropdownMenu(
-                                expanded = accountExpanded,
-                                onDismissRequest = { accountExpanded = false }
-                            ) {
-                                accountOptions.forEach { acc ->
-                                    DropdownMenuItem(
-                                        text = { Text(acc) },
-                                        onClick = {
-                                            viewModel.onAccountChange(acc)
-                                            accountExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
+                        // Server Account Field
+                        OutlinedTextField(
+                            value = state.accountName,
+                            onValueChange = viewModel::onAccountChange,
+                            label = { Text("الحساب / السيرفر الفعلي") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedContainerColor = ext.inputContainer,
+                                unfocusedContainerColor = ext.inputContainer,
+                                focusedTextColor = ext.inputText,
+                                unfocusedTextColor = ext.inputText
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
 
-                        // 2x2 Radio Options matching reference layout
+                        // 2x2 Radio Options
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -248,23 +252,59 @@ fun CardGenerationScreen(
                             }
                         }
 
-                        // Package Name + Price Row
+                        // Package Name + Price Row (NO Point of Sale!)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            ExposedDropdownMenuBox(
-                                expanded = packageExpanded,
-                                onExpandedChange = { packageExpanded = !packageExpanded },
-                                modifier = Modifier.weight(1.2f)
-                            ) {
+                            if (state.packages.isNotEmpty()) {
+                                ExposedDropdownMenuBox(
+                                    expanded = packageExpanded,
+                                    onExpandedChange = { packageExpanded = !packageExpanded },
+                                    modifier = Modifier.weight(1.25f)
+                                ) {
+                                    OutlinedTextField(
+                                        value = state.selectedPackageName,
+                                        onValueChange = viewModel::onPackageNameManualChange,
+                                        label = { Text("اسم الباقة (من المايكروتيك)") },
+                                        singleLine = true,
+                                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = packageExpanded) },
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = ext.inputContainer,
+                                            unfocusedContainerColor = ext.inputContainer,
+                                            focusedTextColor = ext.inputText,
+                                            unfocusedTextColor = ext.inputText
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .menuAnchor(MenuAnchorType.PrimaryEditable)
+                                    )
+                                    ExposedDropdownMenu(
+                                        expanded = packageExpanded,
+                                        onDismissRequest = { packageExpanded = false }
+                                    ) {
+                                        state.packages.forEach { pkg ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    val priceSuffix = if (pkg.price > 0) " (${pkg.price.toLong()} ريال)" else ""
+                                                    Text("${pkg.name}$priceSuffix")
+                                                },
+                                                onClick = {
+                                                    viewModel.onPackageSelected(pkg)
+                                                    packageExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
                                 OutlinedTextField(
                                     value = state.selectedPackageName,
-                                    onValueChange = {},
-                                    readOnly = true,
-                                    label = { Text("اسم الباقة") },
-                                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = packageExpanded) },
+                                    onValueChange = viewModel::onPackageNameManualChange,
+                                    label = { Text("اسم الباقة (Profile)") },
+                                    singleLine = true,
                                     shape = RoundedCornerShape(10.dp),
                                     colors = OutlinedTextFieldDefaults.colors(
                                         focusedContainerColor = ext.inputContainer,
@@ -272,24 +312,8 @@ fun CardGenerationScreen(
                                         focusedTextColor = ext.inputText,
                                         unfocusedTextColor = ext.inputText
                                     ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                                    modifier = Modifier.weight(1.25f)
                                 )
-                                ExposedDropdownMenu(
-                                    expanded = packageExpanded,
-                                    onDismissRequest = { packageExpanded = false }
-                                ) {
-                                    state.packages.forEach { pkg ->
-                                        DropdownMenuItem(
-                                            text = { Text("${pkg.name} (${pkg.price.toLong()} ريال)") },
-                                            onClick = {
-                                                viewModel.onPackageSelected(pkg)
-                                                packageExpanded = false
-                                            }
-                                        )
-                                    }
-                                }
                             }
 
                             OutlinedTextField(
@@ -305,53 +329,15 @@ fun CardGenerationScreen(
                                     focusedTextColor = ext.inputText,
                                     unfocusedTextColor = ext.inputText
                                 ),
-                                modifier = Modifier.weight(0.9f)
+                                modifier = Modifier.weight(0.85f)
                             )
                         }
 
-                        // Point of Sale + Card Count Row
+                        // Card Count + Commission Row
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            ExposedDropdownMenuBox(
-                                expanded = posExpanded,
-                                onExpandedChange = { posExpanded = !posExpanded },
-                                modifier = Modifier.weight(1.2f)
-                            ) {
-                                OutlinedTextField(
-                                    value = state.pointOfSale,
-                                    onValueChange = viewModel::onPointOfSaleChange,
-                                    label = { Text("نقطة البيع") },
-                                    singleLine = true,
-                                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = posExpanded) },
-                                    shape = RoundedCornerShape(10.dp),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedContainerColor = ext.inputContainer,
-                                        unfocusedContainerColor = ext.inputContainer,
-                                        focusedTextColor = ext.inputText,
-                                        unfocusedTextColor = ext.inputText
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                                )
-                                ExposedDropdownMenu(
-                                    expanded = posExpanded,
-                                    onDismissRequest = { posExpanded = false }
-                                ) {
-                                    posOptions.forEach { pos ->
-                                        DropdownMenuItem(
-                                            text = { Text(pos) },
-                                            onClick = {
-                                                viewModel.onPointOfSaleChange(pos)
-                                                posExpanded = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-
                             OutlinedTextField(
                                 value = state.countInput,
                                 onValueChange = viewModel::onCountChange,
@@ -365,7 +351,22 @@ fun CardGenerationScreen(
                                     focusedTextColor = ext.inputText,
                                     unfocusedTextColor = ext.inputText
                                 ),
-                                modifier = Modifier.weight(0.9f)
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = state.commissionInput,
+                                onValueChange = viewModel::onCommissionChange,
+                                label = { Text("العموله") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = ext.inputContainer,
+                                    unfocusedContainerColor = ext.inputContainer,
+                                    focusedTextColor = ext.inputText,
+                                    unfocusedTextColor = ext.inputText
+                                ),
+                                modifier = Modifier.weight(1f)
                             )
                         }
 
@@ -407,17 +408,16 @@ fun CardGenerationScreen(
                             )
                         }
 
-                        // Commission | Suffix (نهاية) | Prefix (بداية)
+                        // Prefix (بداية) + Suffix (نهاية)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             OutlinedTextField(
-                                value = state.commissionInput,
-                                onValueChange = viewModel::onCommissionChange,
-                                label = { Text("العموله") },
+                                value = state.prefixInput,
+                                onValueChange = viewModel::onPrefixChange,
+                                label = { Text("بداية") },
                                 singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 shape = RoundedCornerShape(10.dp),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedContainerColor = ext.inputContainer,
@@ -431,20 +431,6 @@ fun CardGenerationScreen(
                                 value = state.suffixInput,
                                 onValueChange = viewModel::onSuffixChange,
                                 label = { Text("نهاية") },
-                                singleLine = true,
-                                shape = RoundedCornerShape(10.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = ext.inputContainer,
-                                    unfocusedContainerColor = ext.inputContainer,
-                                    focusedTextColor = ext.inputText,
-                                    unfocusedTextColor = ext.inputText
-                                ),
-                                modifier = Modifier.weight(1f)
-                            )
-                            OutlinedTextField(
-                                value = state.prefixInput,
-                                onValueChange = viewModel::onPrefixChange,
-                                label = { Text("بداية") },
                                 singleLine = true,
                                 shape = RoundedCornerShape(10.dp),
                                 colors = OutlinedTextFieldDefaults.colors(
@@ -537,7 +523,6 @@ fun CardGenerationScreen(
                 }
             }
 
-            // Generated Cards Summary Strip
             if (state.generatedCards.isNotEmpty()) {
                 item {
                     Row(
@@ -554,7 +539,7 @@ fun CardGenerationScreen(
                             color = MaterialTheme.colorScheme.onBackground
                         )
                         Text(
-                            text = if (state.isAddedToServer) "محفوظة بالسيرفر وجاهزة للطباعة A4" else "مولدة محلياً (لم تُضف للسيرفر بعد)",
+                            text = if (state.isAddedToServer) "تمت إضافتها في المايكروتيك ✓" else "جاهزة للإضافة إلى المايكروتيك",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = if (state.isAddedToServer) ext.voucherGreen else ext.reportAmberGold
@@ -569,7 +554,7 @@ fun CardGenerationScreen(
         }
     }
 
-    // Verified Server Addition Progress Modal (1%..100% + Live Count + Royal Blue Exit on Completion)
+    // Real MikroTik Addition Progress Modal
     if (state.showServerAdditionDialog) {
         Dialog(
             onDismissRequest = {
@@ -593,70 +578,94 @@ fun CardGenerationScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
+                    val hasError = !state.modalErrorMessage.isNullOrBlank()
                     Box(
                         modifier = Modifier
                             .size(64.dp)
                             .clip(CircleShape)
                             .background(
-                                if (state.additionCompleted) CompletedExitRoyalBlue.copy(alpha = 0.14f)
-                                else ext.royalActionBlue.copy(alpha = 0.14f)
+                                when {
+                                    hasError -> ext.destructivePink.copy(alpha = 0.14f)
+                                    state.additionCompleted -> CompletedExitRoyalBlue.copy(alpha = 0.14f)
+                                    else -> ext.royalActionBlue.copy(alpha = 0.14f)
+                                }
                             ),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = if (state.additionCompleted) Icons.Rounded.CheckCircle else Icons.Rounded.CloudUpload,
+                            imageVector = when {
+                                hasError -> Icons.Rounded.ErrorOutline
+                                state.additionCompleted -> Icons.Rounded.CheckCircle
+                                else -> Icons.Rounded.CloudUpload
+                            },
                             contentDescription = null,
-                            tint = if (state.additionCompleted) CompletedExitRoyalBlue else ext.royalActionBlue,
+                            tint = when {
+                                hasError -> ext.destructivePink
+                                state.additionCompleted -> CompletedExitRoyalBlue
+                                else -> ext.royalActionBlue
+                            },
                             modifier = Modifier.size(38.dp)
                         )
                     }
 
                     Text(
-                        text = if (state.additionCompleted) "اكتملت الإضافة إلى السيرفر بنجاح" else "جاري الإضافة إلى السيرفر...",
+                        text = when {
+                            hasError -> "تعذرت الإضافة إلى المايكروتيك"
+                            state.additionCompleted -> "اكتملت الإضافة إلى المايكروتيك بنجاح"
+                            else -> "جاري الإضافة الفعلية إلى المايكروتيك..."
+                        },
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onSurface,
                         textAlign = TextAlign.Center
                     )
 
-                    LinearProgressIndicator(
-                        progress = { (state.additionProgressPercent / 100f).coerceIn(0f, 1f) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(12.dp)
-                            .clip(RoundedCornerShape(8.dp)),
-                        color = if (state.additionCompleted) CompletedExitRoyalBlue else ext.royalActionBlue,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                        strokeCap = StrokeCap.Round
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
+                    if (hasError) {
                         Text(
-                            text = "تمت إضافة ${state.addedCardsCount} من أصل ${state.targetAdditionCount} كرت",
+                            text = state.modalErrorMessage.orEmpty(),
                             style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = ext.destructivePink,
+                            textAlign = TextAlign.Center
                         )
-                        Text(
-                            text = "${state.additionProgressPercent}%",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = CompletedExitRoyalBlue
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { (state.additionProgressPercent / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(12.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            color = if (state.additionCompleted) CompletedExitRoyalBlue else ext.royalActionBlue,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                            strokeCap = StrokeCap.Round
                         )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "تمت إضافة ${state.addedCardsCount} من أصل ${state.targetAdditionCount} كرت",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "${state.additionProgressPercent}%",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = CompletedExitRoyalBlue
+                            )
+                        }
+
+                        if (state.failedCardsCount > 0) {
+                            Text(
+                                text = "تعذرت إضافة ${state.failedCardsCount} كرت (قد تكون مكررة على السيرفر).",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = ext.reportAmberGold
+                            )
+                        }
                     }
 
-                    if (state.additionCompleted && state.skippedDuplicatesCount > 0) {
-                        Text(
-                            text = "تم تجاهل ${state.skippedDuplicatesCount} كرت مكرر تلقائياً.",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    // Exit Button turns vivid Royal Blue (#1976D2) upon completion!
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -790,15 +799,15 @@ private fun RoseGeneratedVoucherCard(card: CardEntity) {
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "نقطة البيع : ${card.pointOfSale}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White
-                )
-                Text(
                     text = "الباقة : ${card.packageName}",
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Text(
+                    text = if (card.price > 0) "السعر : ${card.price.toLong()} ريال" else "الحساب : ${card.serverAccount.ifBlank { "-" }}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
                     color = Color.White
                 )
             }

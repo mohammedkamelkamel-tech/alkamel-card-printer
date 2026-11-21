@@ -62,7 +62,8 @@ object CardBitmapRenderer {
                 typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
                 textAlign = Paint.Align.RIGHT
             }
-            canvas.drawText("الكامل نت • ${card.packageName}", widthPx - 14f, heightPx * 0.17f, titlePaint)
+            val headerLabel = if (card.packageName.isNotBlank()) "الكامل نت • ${card.packageName}" else "الكامل نت"
+            canvas.drawText(headerLabel, widthPx - 14f, heightPx * 0.17f, titlePaint)
         }
 
         val textColor = runCatching { Color.parseColor(template.textColorHex) }
@@ -92,18 +93,6 @@ object CardBitmapRenderer {
                 template.passwordX.coerceIn(0.05f, 0.95f) * widthPx,
                 template.passwordY.coerceIn(0.14f, 0.94f) * heightPx,
                 pPaint
-            )
-        }
-        if (template.showPointOfSale && card.pointOfSale.isNotBlank()) {
-            val posPaint = Paint(paint).apply {
-                textSize = (fontSize * 0.72f).coerceAtLeast(11f)
-                typeface = Typeface.DEFAULT
-            }
-            canvas.drawText(
-                card.pointOfSale,
-                template.pointOfSaleX.coerceIn(0.05f, 0.95f) * widthPx,
-                template.pointOfSaleY.coerceIn(0.14f, 0.94f) * heightPx,
-                posPaint
             )
         }
         if (template.showQrCode) {

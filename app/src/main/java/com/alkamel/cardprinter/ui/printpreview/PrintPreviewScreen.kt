@@ -1,6 +1,5 @@
 package com.alkamel.cardprinter.ui.printpreview
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -131,7 +130,6 @@ fun PrintPreviewScreen(
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Template Selector Chips
             if (state.templates.isNotEmpty()) {
                 Row(
                     modifier = Modifier
@@ -149,7 +147,6 @@ fun PrintPreviewScreen(
                 }
             }
 
-            // PDF Export & Share Controls (A4 Only)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -184,7 +181,6 @@ fun PrintPreviewScreen(
                 }
             }
 
-            // Page Navigation Bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -209,7 +205,6 @@ fun PrintPreviewScreen(
                 }
             }
 
-            // A4 White Sheet Preview Container
             Card(
                 shape = RoundedCornerShape(8.dp),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -272,7 +267,6 @@ fun PrintPreviewScreen(
                                         template = state.activeTemplate,
                                         sampleUsername = card.username,
                                         samplePassword = card.password,
-                                        samplePointOfSale = card.pointOfSale,
                                         selectedElement = null,
                                         isInteractive = false,
                                         onElementDragged = { _, _, _ -> },

@@ -68,7 +68,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.alkamel.cardprinter.ui.components.AlkamelTopHeader
 import com.alkamel.cardprinter.ui.components.CardDesignPreviewBox
-import com.alkamel.cardprinter.ui.components.DesignerElement
 import com.alkamel.cardprinter.ui.components.parseHexColorSafe
 import com.alkamel.cardprinter.ui.theme.AlkamelTheme
 
@@ -128,7 +127,6 @@ fun CardDesignerScreen(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Saved Templates Selector Row
             if (state.templates.isNotEmpty()) {
                 Row(
                     modifier = Modifier
@@ -146,7 +144,6 @@ fun CardDesignerScreen(
                 }
             }
 
-            // Live Interactive Preview Box
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -169,7 +166,6 @@ fun CardDesignerScreen(
                         template = state.activeTemplate,
                         sampleUsername = "15650109767",
                         samplePassword = "4821",
-                        samplePointOfSale = "ether3",
                         selectedElement = state.selectedElement,
                         isInteractive = true,
                         onElementDragged = viewModel::onElementDragged,
@@ -198,7 +194,6 @@ fun CardDesignerScreen(
                 }
             }
 
-            // Template Info & A4 Grid Dimensions
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -294,7 +289,6 @@ fun CardDesignerScreen(
                 }
             }
 
-            // Show Elements, Color & Font Size
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -316,15 +310,9 @@ fun CardDesignerScreen(
                             Text("كلمة السر")
                         }
                     }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Checkbox(checked = state.activeTemplate.showPointOfSale, onCheckedChange = viewModel::onToggleShowPointOfSale)
-                            Text("نقطة البيع")
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Checkbox(checked = state.activeTemplate.showQrCode, onCheckedChange = viewModel::onToggleShowQrCode)
-                            Text("رمز QR")
-                        }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = state.activeTemplate.showQrCode, onCheckedChange = viewModel::onToggleShowQrCode)
+                        Text("إظهار رمز QR")
                     }
 
                     Text("لون النص:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
@@ -359,7 +347,6 @@ fun CardDesignerScreen(
                 }
             }
 
-            // Save & Delete Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)

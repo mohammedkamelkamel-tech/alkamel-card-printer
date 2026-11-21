@@ -20,11 +20,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Login
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.SettingsEthernet
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -39,6 +41,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -65,8 +68,8 @@ fun LoginScreen(
     val ext = AlkamelTheme.extendedColors
     val snackbarHostState = remember { SnackbarHostState() }
 
-    LaunchedEffect(state.statusMessage, state.errorMessage) {
-        val msg = state.errorMessage ?: state.statusMessage
+    LaunchedEffect(state.statusMessage) {
+        val msg = state.statusMessage
         if (!msg.isNullOrBlank()) {
             snackbarHostState.showSnackbar(msg)
             viewModel.clearMessages()
@@ -100,12 +103,12 @@ fun LoginScreen(
                         ),
                         shape = RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp)
                     )
-                    .padding(vertical = 28.dp, horizontal = 20.dp),
+                    .padding(vertical = 26.dp, horizontal = 20.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    AlkamelOfficialLogo(size = 104.dp, showGlowBorder = true)
-                    Spacer(modifier = Modifier.height(14.dp))
+                    AlkamelOfficialLogo(size = 100.dp, showGlowBorder = true)
+                    Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "الكامل-طباعة الكروت",
                         style = MaterialTheme.typography.headlineSmall,
@@ -114,7 +117,7 @@ fun LoginScreen(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "تشغيل محلي مستقر لإدارة وطباعة الكروت بمقاس A4",
+                        text = "الربط المباشر بسيرفر المايكروتيك وطباعة الكروت بمقاس A4",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -127,6 +130,36 @@ fun LoginScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Explicit MikroTik Connection Error Banner (never hidden)
+                if (!state.errorMessage.isNullOrBlank()) {
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = ext.destructivePink.copy(alpha = 0.14f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ErrorOutline,
+                                contentDescription = null,
+                                tint = ext.destructivePink,
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Text(
+                                text = state.errorMessage.orEmpty(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = ext.destructivePink
+                            )
+                        }
+                    }
+                }
+
                 Card(
                     shape = RoundedCornerShape(18.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -138,7 +171,7 @@ fun LoginScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "بيانات الشبكة والجلسة المحلية",
+                            text = "بيانات الربط بسيرفر المايكروتيك (RouterOS API)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -158,14 +191,14 @@ fun LoginScreen(
                             AlkamelTextField(
                                 value = state.hostAddress,
                                 onValueChange = viewModel::onHostAddressChange,
-                                label = "عنوان السيرفر (IP / Host)",
+                                label = "عنوان المايكروتيك (IP / Host)",
                                 leadingIcon = Icons.Rounded.Dns,
                                 modifier = Modifier.weight(1.7f)
                             )
                             AlkamelTextField(
                                 value = state.port,
                                 onValueChange = viewModel::onPortChange,
-                                label = "المنفذ",
+                                label = "منفذ API",
                                 leadingIcon = Icons.Rounded.SettingsEthernet,
                                 keyboardType = KeyboardType.Number,
                                 modifier = Modifier.weight(1f)
@@ -182,7 +215,7 @@ fun LoginScreen(
                         AlkamelTextField(
                             value = state.password,
                             onValueChange = viewModel::onPasswordChange,
-                            label = "كلمة المرور (اختياري للتشغيل المحلي)",
+                            label = "كلمة المرور",
                             leadingIcon = Icons.Rounded.Lock,
                             isPassword = true
                         )
@@ -200,7 +233,7 @@ fun LoginScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "خيار تحميل الكروت عند الدخول",
+                            text = "خيار جلب الكروت بعد الاتصال بالمايكروتيك",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -232,8 +265,8 @@ fun LoginScreen(
                 }
 
                 Button(
-                    onClick = { viewModel.loginLocally(onLoginSuccess) },
-                    enabled = !state.isSubmitting,
+                    onClick = { viewModel.connectToMikrotikAndLogin(onLoginSuccess) },
+                    enabled = !state.isConnecting,
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = ext.royalActionBlue,
@@ -243,17 +276,19 @@ fun LoginScreen(
                         .fillMaxWidth()
                         .height(54.dp)
                 ) {
-                    if (state.isSubmitting) {
+                    if (state.isConnecting) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(22.dp),
                             color = Color.White,
                             strokeWidth = 2.5.dp
                         )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("جاري الاتصال بسيرفر المايكروتيك...", fontWeight = FontWeight.Bold)
                     } else {
                         Icon(imageVector = Icons.AutoMirrored.Rounded.Login, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "دخول إلى لوحة التحكم",
+                            text = "اتصال بالمايكروتيك ودخول",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -286,6 +321,25 @@ fun LoginScreen(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("حفظ", fontWeight = FontWeight.SemiBold)
                     }
+                }
+
+                TextButton(
+                    onClick = { viewModel.enterOfflineViewMode(onLoginSuccess) },
+                    enabled = !state.isConnecting,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.WifiOff,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "الدخول بدون اتصال (للمعاينة والطباعة من البيانات المحفوظة فقط)",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

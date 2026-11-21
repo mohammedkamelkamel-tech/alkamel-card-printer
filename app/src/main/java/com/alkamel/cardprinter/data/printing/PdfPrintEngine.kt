@@ -174,9 +174,9 @@ object PdfPrintEngine {
 
                 c.drawRect(40f, y, A4_W - 40f, y + 46f, headBg)
                 c.drawText("رقم الكرت / العملية", A4_W - 54f, y + 30f, headTxt)
-                c.drawText("الفئة", A4_W - 350f, y + 30f, headTxt)
+                c.drawText("الباقة", A4_W - 350f, y + 30f, headTxt)
                 c.drawText("السعر", A4_W - 520f, y + 30f, headTxt)
-                c.drawText("المنفذ", A4_W - 680f, y + 30f, headTxt)
+                c.drawText("الحساب", A4_W - 680f, y + 30f, headTxt)
                 c.drawText("التحميل", A4_W - 840f, y + 30f, headTxt)
                 c.drawText("التاريخ", A4_W - 1010f, y + 30f, headTxt)
                 y += 48f
@@ -190,7 +190,7 @@ object PdfPrintEngine {
                         c.drawText(log.cardUsername.take(18), A4_W - 54f, rowY, cellTxt)
                         c.drawText(log.packageName.take(12), A4_W - 350f, rowY, cellTxt)
                         c.drawText("${log.totalAmount.toLong()}", A4_W - 520f, rowY, cellTxt)
-                        c.drawText(log.pointOfSale.ifBlank { "ether3" }.take(10), A4_W - 680f, rowY, cellTxt)
+                        c.drawText(log.serverAccount.ifBlank { "-" }.take(10), A4_W - 680f, rowY, cellTxt)
                         c.drawText(log.downloadLabel.ifBlank { "0 MB" }.take(10), A4_W - 840f, rowY, cellTxt)
                         c.drawText(df.format(Date(log.createdAt)), A4_W - 1010f, rowY, cellTxt)
                         y += 44f

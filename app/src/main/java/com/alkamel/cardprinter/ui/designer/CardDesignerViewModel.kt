@@ -144,7 +144,6 @@ class CardDesignerViewModel(
 
     fun onToggleShowUsername(show: Boolean) = updateTemplate { it.copy(showUsername = show) }
     fun onToggleShowPassword(show: Boolean) = updateTemplate { it.copy(showPassword = show) }
-    fun onToggleShowPointOfSale(show: Boolean) = updateTemplate { it.copy(showPointOfSale = show) }
     fun onToggleShowQrCode(show: Boolean) = updateTemplate { it.copy(showQrCode = show) }
     fun onTextColorSelected(hex: String) = updateTemplate { it.copy(textColorHex = hex) }
     fun onFontSizeChange(sizeSp: Float) = updateTemplate { it.copy(fontSizeSp = sizeSp.coerceIn(10f, 28f)) }
@@ -161,10 +160,6 @@ class CardDesignerViewModel(
                 DesignerElement.PASSWORD -> t.copy(
                     passwordX = (t.passwordX + deltaRelX).coerceIn(0.05f, 0.95f),
                     passwordY = (t.passwordY + deltaRelY).coerceIn(0.10f, 0.90f)
-                )
-                DesignerElement.POINT_OF_SALE -> t.copy(
-                    pointOfSaleX = (t.pointOfSaleX + deltaRelX).coerceIn(0.05f, 0.95f),
-                    pointOfSaleY = (t.pointOfSaleY + deltaRelY).coerceIn(0.10f, 0.90f)
                 )
                 DesignerElement.QR_CODE -> t.copy(
                     qrX = (t.qrX + deltaRelX).coerceIn(0.08f, 0.92f),
