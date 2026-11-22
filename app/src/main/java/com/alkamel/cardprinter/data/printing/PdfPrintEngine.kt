@@ -40,10 +40,8 @@ sealed class PdfResult {
 
 object PdfPrintEngine {
 
-    private const val A4_W = 1240
-    private const val A4_H = 1754
-    private const val MARGIN = 30f
-    private const val HEADER_H = 46f
+    private const val A4_W = CardLayoutMetrics.A4_PDF_WIDTH
+    private const val A4_H = CardLayoutMetrics.A4_PDF_HEIGHT
 
     suspend fun generateCardsGridPdf(
         context: Context,
@@ -60,66 +58,26 @@ object PdfPrintEngine {
         try {
             val cols = safeTemplate.columnsPerPage.coerceIn(1, 6)
             val rows = safeTemplate.rowsPerPage.coerceIn(1, 30)
-            val perPage = cols * rows
+            val perPage = (cols * rows).coerceAtLeast(1)
             val pages = ceil(cards.size.toDouble() / perPage).toInt().coerceAtLeast(1)
-
-            val topHeaderSpace = if (showPageHeader) HEADER_H else 0f
-            val gap = 4f
-            val cellW = (A4_W - MARGIN * 2 - gap * (cols - 1)) / cols
-            val ratio = safeTemplate.cardHeight.coerceAtLeast(20f) / safeTemplate.cardWidth.coerceAtLeast(40f)
-            val maxRowH = (A4_H - MARGIN * 2 - topHeaderSpace - gap * (rows - 1)) / rows
-            val cellH = minOf(cellW * ratio, maxRowH)
-
             val dateStr = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.US).format(Date())
-            val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#0F172A")
-                textSize = 20f
-                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-                textAlign = Paint.Align.RIGHT
-            }
-            val metaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#475569")
-                textSize = 17f
-                textAlign = Paint.Align.LEFT
-            }
-            val cutPaint = Paint().apply {
-                color = Color.parseColor("#94A3B8")
-                style = Paint.Style.STROKE
-                strokeWidth = 1f
-            }
-
-            // Render card bitmaps at 2x print resolution for sharp card numbers on A4
-            val renderW = (cellW * 2f).roundToInt().coerceIn(320, 720)
-            val renderH = (cellH * 2f).roundToInt().coerceIn(96, 480)
+            val pkgSuffix = if (safeTemplate.packageName == "الكل") "" else " • ${safeTemplate.packageName}"
 
             for (p in 0 until pages) {
                 val page = doc.startPage(PdfDocument.PageInfo.Builder(A4_W, A4_H, p + 1).create())
-                val c = page.canvas
-                c.drawColor(Color.WHITE)
-
-                if (showPageHeader) {
-                    c.drawText("$title • ${safeTemplate.name} (${cards.size} كرت)", A4_W - MARGIN, MARGIN + 22f, titlePaint)
-                    c.drawText("A4 • صفحة ${p + 1}/$pages  |  $dateStr", MARGIN, MARGIN + 22f, metaPaint)
-                }
-
                 val slice = cards.subList(p * perPage, minOf((p + 1) * perPage, cards.size))
-                slice.forEachIndexed { idx, card ->
-                    val r = idx / cols
-                    val col = (cols - 1) - (idx % cols)
-                    val left = MARGIN + col * (cellW + gap)
-                    val top = MARGIN + topHeaderSpace + r * (cellH + gap)
-                    val dest = RectF(left, top, left + cellW, top + cellH)
-                    val bmp = CardBitmapRenderer.renderCardBitmap(
-                        card = card,
-                        template = safeTemplate,
-                        widthPx = renderW,
-                        heightPx = renderH,
-                        preloadedBackground = preloadedBg
-                    )
-                    c.drawBitmap(bmp, null, dest, Paint(Paint.FILTER_BITMAP_FLAG))
-                    if (showCutGuides) c.drawRect(dest, cutPaint)
-                    bmp.recycle()
-                }
+                CardBitmapRenderer.drawA4PageOnCanvas(
+                    canvas = page.canvas,
+                    pageWidth = A4_W.toFloat(),
+                    pageHeight = A4_H.toFloat(),
+                    cardsOnPage = slice,
+                    template = safeTemplate,
+                    headerTitle = "$title • ${safeTemplate.name}$pkgSuffix (${cards.size} كرت)",
+                    headerMeta = "A4 • صفحة ${p + 1}/$pages  |  $dateStr",
+                    showCutGuides = showCutGuides,
+                    showPageHeader = showPageHeader,
+                    preloadedBackground = preloadedBg
+                )
                 doc.finishPage(page)
             }
             saveDocument(context, doc, "alkamel_a4_cards")
@@ -142,6 +100,8 @@ object PdfPrintEngine {
     ): PdfResult = withContext(Dispatchers.IO) {
         val doc = PdfDocument()
         try {
+            val reportW = 1240
+            val reportH = 1754
             val rowsPerPage = 24
             val pages = ceil(maxOf(1, logs.size).toDouble() / rowsPerPage).toInt()
             val bannerPaint = Paint().apply { color = Color.parseColor("#111B2E") }
@@ -166,45 +126,48 @@ object PdfPrintEngine {
             for (p in 0 until pages) {
                 val page = doc.startPage(PdfDocument.PageInfo.Builder(A4_W, A4_H, p + 1).create())
                 val c = page.canvas
+                c.save()
+                c.scale(A4_W.toFloat() / reportW.toFloat(), A4_H.toFloat() / reportH.toFloat())
                 c.drawColor(Color.WHITE)
-                c.drawRect(0f, 0f, A4_W.toFloat(), 145f, bannerPaint)
-                c.drawText("الكامل-طباعة الكروت | تقرير المبيعات (A4)", A4_W - 44f, 64f, titlePaint)
-                c.drawText("الفترة: $fromDateKey إلى $toDateKey  •  صفحة ${p + 1}/$pages", A4_W - 44f, 108f, subPaint)
+                c.drawRect(0f, 0f, reportW.toFloat(), 145f, bannerPaint)
+                c.drawText("الكامل-طباعة الكروت | تقرير المبيعات (A4)", reportW - 44f, 64f, titlePaint)
+                c.drawText("الفترة: $fromDateKey إلى $toDateKey  •  صفحة ${p + 1}/$pages", reportW - 44f, 108f, subPaint)
 
                 var y = 170f
                 if (p == 0) {
-                    c.drawRoundRect(RectF(40f, y, A4_W - 40f, y + 96f), 14f, 14f, Paint().apply { color = Color.parseColor("#F1F5F9") })
+                    c.drawRoundRect(RectF(40f, y, reportW - 40f, y + 96f), 14f, 14f, Paint().apply { color = Color.parseColor("#F1F5F9") })
                     val boldCell = Paint(cellTxt).apply { typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD); textSize = 21f }
-                    c.drawText("إجمالي المبيعات: ${totalAmount.toLong()} ريال", A4_W - 64f, y + 40f, boldCell)
-                    c.drawText("عدد الكروت: $totalCards كرت  |  الأكثر مبيعاً: $topPackage", A4_W - 64f, y + 78f, cellTxt)
+                    c.drawText("إجمالي المبيعات: ${totalAmount.toLong()} ريال", reportW - 64f, y + 40f, boldCell)
+                    c.drawText("عدد الكروت: $totalCards كرت  |  الأكثر مبيعاً: $topPackage", reportW - 64f, y + 78f, cellTxt)
                     y += 120f
                 }
 
-                c.drawRect(40f, y, A4_W - 40f, y + 46f, headBg)
-                c.drawText("رقم الكرت / العملية", A4_W - 54f, y + 30f, headTxt)
-                c.drawText("الباقة", A4_W - 350f, y + 30f, headTxt)
-                c.drawText("السعر", A4_W - 520f, y + 30f, headTxt)
-                c.drawText("الحساب", A4_W - 680f, y + 30f, headTxt)
-                c.drawText("التحميل", A4_W - 840f, y + 30f, headTxt)
-                c.drawText("التاريخ", A4_W - 1010f, y + 30f, headTxt)
+                c.drawRect(40f, y, reportW - 40f, y + 46f, headBg)
+                c.drawText("رقم الكرت / العملية", reportW - 54f, y + 30f, headTxt)
+                c.drawText("الباقة", reportW - 350f, y + 30f, headTxt)
+                c.drawText("السعر", reportW - 520f, y + 30f, headTxt)
+                c.drawText("الحساب", reportW - 680f, y + 30f, headTxt)
+                c.drawText("التحميل", reportW - 840f, y + 30f, headTxt)
+                c.drawText("التاريخ", reportW - 1010f, y + 30f, headTxt)
                 y += 48f
 
                 val slice = if (logs.isEmpty()) emptyList() else logs.subList(p * rowsPerPage, minOf((p + 1) * rowsPerPage, logs.size))
                 if (slice.isEmpty()) {
-                    c.drawText("لا توجد عمليات مبيعات خلال الفترة المحددة.", A4_W - 64f, y + 42f, cellTxt)
+                    c.drawText("لا توجد عمليات مبيعات خلال الفترة المحددة.", reportW - 64f, y + 42f, cellTxt)
                 } else {
                     slice.forEach { log ->
                         val rowY = y + 30f
-                        c.drawText(log.cardUsername.take(18), A4_W - 54f, rowY, cellTxt)
-                        c.drawText(log.packageName.take(12), A4_W - 350f, rowY, cellTxt)
-                        c.drawText("${log.totalAmount.toLong()}", A4_W - 520f, rowY, cellTxt)
-                        c.drawText(log.serverAccount.ifBlank { "-" }.take(10), A4_W - 680f, rowY, cellTxt)
-                        c.drawText(log.downloadLabel.ifBlank { "0 MB" }.take(10), A4_W - 840f, rowY, cellTxt)
-                        c.drawText(df.format(Date(log.createdAt)), A4_W - 1010f, rowY, cellTxt)
+                        c.drawText(log.cardUsername.take(18), reportW - 54f, rowY, cellTxt)
+                        c.drawText(log.packageName.take(12), reportW - 350f, rowY, cellTxt)
+                        c.drawText("${log.totalAmount.toLong()}", reportW - 520f, rowY, cellTxt)
+                        c.drawText(log.serverAccount.ifBlank { "-" }.take(10), reportW - 680f, rowY, cellTxt)
+                        c.drawText(log.downloadLabel.ifBlank { "0 MB" }.take(10), reportW - 840f, rowY, cellTxt)
+                        c.drawText(df.format(Date(log.createdAt)), reportW - 1010f, rowY, cellTxt)
                         y += 44f
-                        c.drawLine(40f, y, A4_W - 40f, y, linePaint)
+                        c.drawLine(40f, y, reportW - 40f, y, linePaint)
                     }
                 }
+                c.restore()
                 doc.finishPage(page)
             }
             saveDocument(context, doc, "alkamel_a4_sales_report")

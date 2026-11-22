@@ -3,11 +3,6 @@ package com.alkamel.cardprinter.ui.designer
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
-import android.graphics.Typeface
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -38,8 +33,8 @@ data class CardDesignerUiState(
     val widthInput: String = "203",
     val heightInput: String = "61",
     val columnsInput: String = "4",
-    val rowsInput: String = "25",
-    val cardsPerA4Page: Int = 100,
+    val rowsInput: String = "17",
+    val cardsPerA4Page: Int = 68,
     val showA4PreviewDialog: Boolean = false,
     val a4PreviewBitmap: Bitmap? = null,
     val isRenderingA4Preview: Boolean = false,
@@ -103,16 +98,20 @@ class CardDesignerViewModel(
     }
 
     fun createNewBlankTemplate() {
+        val defaultW = 203f
+        val defaultH = 61f
+        val cols = CardLayoutMetrics.calculateFittingColumns(defaultW)
+        val rows = CardLayoutMetrics.calculateFittingRows(defaultH)
         val fresh = CardLayoutMetrics.sanitize(
             CardTemplateEntity(
                 id = 0L,
                 name = "قالب يوزر منجر ${_uiState.value.templates.size + 1}",
                 packageName = "الكل",
                 backgroundImagePath = null,
-                cardWidth = 203f,
-                cardHeight = 61f,
-                columnsPerPage = 4,
-                rowsPerPage = 25,
+                cardWidth = defaultW,
+                cardHeight = defaultH,
+                columnsPerPage = cols,
+                rowsPerPage = rows,
                 showUsername = true,
                 showPassword = false,
                 showQrCode = false,
@@ -139,6 +138,10 @@ class CardDesignerViewModel(
 
     fun onSelectedElementChange(element: DesignerElement) = _uiState.update { it.copy(selectedElement = element) }
     fun clearMessages() = _uiState.update { it.copy(statusMessage = null, errorMessage = null) }
+
+    fun nudgeSelectedElement(deltaRelX: Float, deltaRelY: Float) {
+        onElementDragged(_uiState.value.selectedElement, deltaRelX, deltaRelY)
+    }
 
     fun resetElementPositions() {
         updateTemplate {
@@ -251,7 +254,23 @@ class CardDesignerViewModel(
         _uiState.update { it.copy(showA4PreviewDialog = true, isRenderingA4Preview = true) }
         viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
-                renderFullA4PageBitmap(tpl)
+                val perPage = (tpl.columnsPerPage * tpl.rowsPerPage).coerceAtLeast(1)
+                val sampleCards = List(perPage) {
+                    CardEntity(
+                        username = "15650109767",
+                        password = "4821",
+                        packageName = tpl.packageName
+                    )
+                }
+                val pkgLabel = if (tpl.packageName == "الكل") "جميع الباقات" else tpl.packageName
+                CardBitmapRenderer.renderA4PageBitmap(
+                    cardsOnPage = sampleCards,
+                    template = tpl,
+                    headerTitle = "${tpl.name} • $pkgLabel ($perPage كرت/صفحة)",
+                    headerMeta = "A4 • ${tpl.columnsPerPage}×${tpl.rowsPerPage}",
+                    showCutGuides = true,
+                    showPageHeader = true
+                )
             }
             _uiState.update {
                 it.copy(
@@ -298,13 +317,20 @@ class CardDesignerViewModel(
         }
     }
 
+    private data class SavedImageResult(
+        val path: String,
+        val naturalWidth: Int,
+        val naturalHeight: Int
+    )
+
     /**
      * Copies the picked image into an independent UUID-named file dedicated exclusively
-     * to the active template so images never overwrite or bleed across different templates.
+     * to the active template and automatically matches the card's height/aspect ratio
+     * to the image's real natural aspect ratio so the artwork never stretches or distorts.
      */
     fun copyPickedBackgroundImage(context: Context, uri: Uri) {
         viewModelScope.launch {
-            val savedPath = withContext(Dispatchers.IO) {
+            val saved = withContext(Dispatchers.IO) {
                 runCatching {
                     val dir = File(context.filesDir, "card_templates").apply { mkdirs() }
                     val uniqueFile = File(dir, "tpl_bg_${UUID.randomUUID()}.png")
@@ -312,14 +338,17 @@ class CardDesignerViewModel(
                         BitmapFactory.decodeStream(input)
                     }
                     if (decoded != null) {
+                        val w = decoded.width
+                        val h = decoded.height
                         FileOutputStream(uniqueFile).use { out ->
                             decoded.compress(Bitmap.CompressFormat.PNG, 100, out)
                             out.flush()
                         }
                         decoded.recycle()
-                        uniqueFile.takeIf { it.exists() && it.length() > 0L }?.absolutePath
+                        if (uniqueFile.exists() && uniqueFile.length() > 0L) {
+                            SavedImageResult(uniqueFile.absolutePath, w, h)
+                        } else null
                     } else {
-                        // Fallback raw byte copy if decoder returned null
                         val rawFile = File(dir, "tpl_bg_${UUID.randomUUID()}.jpg")
                         context.contentResolver.openInputStream(uri)?.use { input ->
                             FileOutputStream(rawFile).use { output ->
@@ -327,27 +356,61 @@ class CardDesignerViewModel(
                                 output.flush()
                             }
                         }
-                        rawFile.takeIf { it.exists() && it.length() > 0L }?.absolutePath
+                        if (rawFile.exists() && rawFile.length() > 0L) {
+                            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            BitmapFactory.decodeFile(rawFile.absolutePath, opts)
+                            SavedImageResult(rawFile.absolutePath, opts.outWidth, opts.outHeight)
+                        } else null
                     }
                 }.getOrNull()
             }
-            if (savedPath != null) {
-                val hadNoBackgroundBefore = _uiState.value.activeTemplate.backgroundImagePath.isNullOrBlank()
-                val wasDefaultWhite = _uiState.value.activeTemplate.textColorHex.equals("#FFFFFF", ignoreCase = true)
+
+            if (saved != null) {
+                val current = _uiState.value.activeTemplate
+                val hadNoBackgroundBefore = current.backgroundImagePath.isNullOrBlank()
+                val wasDefaultWhite = current.textColorHex.equals("#FFFFFF", ignoreCase = true)
                 val autoSwitchToDark = hadNoBackgroundBefore && wasDefaultWhite
 
-                updateTemplate { tpl ->
-                    tpl.copy(
-                        backgroundImagePath = savedPath,
-                        textColorHex = if (autoSwitchToDark) "#000000" else tpl.textColorHex
+                // Automatically adapt cardHeight to preserve the exact natural aspect ratio of the picked image
+                val nextW = current.cardWidth.coerceIn(60f, 500f)
+                val nextH = if (saved.naturalWidth > 0 && saved.naturalHeight > 0) {
+                    (nextW * saved.naturalHeight.toFloat() / saved.naturalWidth.toFloat())
+                        .roundToInt()
+                        .toFloat()
+                        .coerceIn(30f, 300f)
+                } else {
+                    current.cardHeight
+                }
+                val nextCols = CardLayoutMetrics.calculateFittingColumns(nextW)
+                val nextRows = CardLayoutMetrics.calculateFittingRows(nextH)
+
+                val updatedTpl = CardLayoutMetrics.sanitize(
+                    current.copy(
+                        backgroundImagePath = saved.path,
+                        cardWidth = nextW,
+                        cardHeight = nextH,
+                        columnsPerPage = nextCols,
+                        rowsPerPage = nextRows,
+                        textColorHex = if (autoSwitchToDark) "#000000" else current.textColorHex
+                    )
+                )
+
+                val msg = if (autoSwitchToDark) {
+                    "تم تعيين صورة القالب ومطابقة أبعادها تلقائياً دون تشويه (وضبط لون النص للأسود لوضوح الرقم)."
+                } else {
+                    "تم تعيين صورة خلفية مستقلة لهذا القالب ومطابقة أبعادها على ورقة A4 دون تشويه."
+                }
+                _uiState.update {
+                    it.copy(
+                        activeTemplate = updatedTpl,
+                        widthInput = updatedTpl.cardWidth.toInt().toString(),
+                        heightInput = updatedTpl.cardHeight.toInt().toString(),
+                        columnsInput = updatedTpl.columnsPerPage.toString(),
+                        rowsInput = updatedTpl.rowsPerPage.toString(),
+                        cardsPerA4Page = updatedTpl.columnsPerPage * updatedTpl.rowsPerPage,
+                        statusMessage = msg
                     )
                 }
-                val msg = if (autoSwitchToDark) {
-                    "تم تعيين صورة القالب وضبط لون النص إلى الأسود لوضوح رقم الكرت (اضغط حفظ القالب لتثبيت التعديلات)."
-                } else {
-                    "تم تعيين صورة خلفية مستقلة لهذا القالب (اضغط حفظ القالب لتثبيت التعديلات)."
-                }
-                _uiState.update { it.copy(statusMessage = msg) }
             } else {
                 _uiState.update { it.copy(errorMessage = "تعذر قراءة الصورة المختارة.") }
             }
@@ -401,7 +464,6 @@ class CardDesignerViewModel(
             val imagePathToCheck = current.backgroundImagePath
             repository.deleteTemplate(current)
                 .onSuccess {
-                    // Safely clean up orphaned template image only if no other template uses it
                     if (!imagePathToCheck.isNullOrBlank()) {
                         val stillReferenced = allTemplates.any {
                             it.id != current.id && it.backgroundImagePath == imagePathToCheck
@@ -424,81 +486,6 @@ class CardDesignerViewModel(
                     _uiState.update { it.copy(errorMessage = err.localizedMessage ?: "تعذر حذف القالب") }
                 }
         }
-    }
-
-    private fun renderFullA4PageBitmap(template: CardTemplateEntity): Bitmap {
-        val safeTemplate = CardLayoutMetrics.sanitize(template)
-        val pageW = 900
-        val pageH = 1273 // ISO A4 ratio 210:297
-        val margin = 24f
-        val headerH = 38f
-        val gap = 3f
-
-        val cols = safeTemplate.columnsPerPage.coerceIn(1, 6)
-        val rows = safeTemplate.rowsPerPage.coerceIn(1, 30)
-        val perPage = cols * rows
-
-        val cellW = (pageW - margin * 2 - gap * (cols - 1)) / cols
-        val ratio = safeTemplate.cardHeight.coerceAtLeast(20f) / safeTemplate.cardWidth.coerceAtLeast(40f)
-        val maxRowH = (pageH - margin * 2 - headerH - gap * (rows - 1)) / rows
-        val cellH = minOf(cellW * ratio, maxRowH)
-
-        val pageBmp = Bitmap.createBitmap(pageW, pageH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(pageBmp)
-        canvas.drawColor(Color.WHITE)
-
-        val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#0F172A")
-            textSize = 17f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            textAlign = Paint.Align.RIGHT
-        }
-        val metaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#475569")
-            textSize = 14f
-            textAlign = Paint.Align.LEFT
-        }
-        val cutPaint = Paint().apply {
-            color = Color.parseColor("#94A3B8")
-            style = Paint.Style.STROKE
-            strokeWidth = 1f
-        }
-
-        val pkgLabel = if (safeTemplate.packageName == "الكل") "جميع الباقات" else safeTemplate.packageName
-        canvas.drawText("${safeTemplate.name} • $pkgLabel ($perPage كرت/صفحة)", pageW - margin, margin + 18f, headerPaint)
-        canvas.drawText("A4 • $cols×$rows", margin, margin + 18f, metaPaint)
-
-        val sampleCard = CardEntity(
-            username = "15650109767",
-            password = "4821",
-            packageName = safeTemplate.packageName
-        )
-        val preloadedBg = CardBitmapRenderer.decodeBackgroundBitmap(safeTemplate)
-        val cardBmp = try {
-            CardBitmapRenderer.renderCardBitmap(
-                card = sampleCard,
-                template = safeTemplate,
-                widthPx = (cellW * 2f).roundToInt().coerceIn(220, 620),
-                heightPx = (cellH * 2f).roundToInt().coerceIn(70, 360),
-                preloadedBackground = preloadedBg
-            )
-        } finally {
-            preloadedBg?.recycle()
-        }
-        val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
-
-        for (r in 0 until rows) {
-            for (c in 0 until cols) {
-                val colRtl = (cols - 1) - c
-                val left = margin + colRtl * (cellW + gap)
-                val top = margin + headerH + r * (cellH + gap)
-                val dest = RectF(left, top, left + cellW, top + cellH)
-                canvas.drawBitmap(cardBmp, null, dest, bmpPaint)
-                canvas.drawRect(dest, cutPaint)
-            }
-        }
-        cardBmp.recycle()
-        return pageBmp
     }
 
     private fun updateTemplate(transform: (CardTemplateEntity) -> CardTemplateEntity) {

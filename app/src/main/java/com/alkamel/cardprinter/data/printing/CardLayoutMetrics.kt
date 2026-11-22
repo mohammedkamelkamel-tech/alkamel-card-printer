@@ -1,18 +1,59 @@
 package com.alkamel.cardprinter.data.printing
 
+import android.graphics.RectF
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
 import kotlin.math.floor
 
 /**
+ * Computed aspect-ratio-locked A4 grid geometry shared identically by:
+ * - CardDesignerScreen Full A4 Preview
+ * - PrintPreviewScreen A4 Sheet Preview
+ * - PdfPrintEngine A4 PDF Export & Direct Print
+ */
+data class A4SheetLayout(
+    val pageWidth: Float,
+    val pageHeight: Float,
+    val margin: Float,
+    val headerHeight: Float,
+    val gap: Float,
+    val columns: Int,
+    val rows: Int,
+    val cardWidthPx: Float,
+    val cardHeightPx: Float,
+    val gridStartX: Float,
+    val gridStartY: Float
+) {
+    val cardsPerPage: Int get() = columns * rows
+
+    fun cellRect(row: Int, colFromRight: Int): RectF {
+        val physicalCol = (columns - 1) - colFromRight
+        val left = gridStartX + physicalCol * (cardWidthPx + gap)
+        val top = gridStartY + row * (cardHeightPx + gap)
+        return RectF(left, top, left + cardWidthPx, top + cardHeightPx)
+    }
+}
+
+/**
  * Single source of truth for card layout geometry, normalized (0.0..1.0) coordinates,
- * proportional text sizing, A4 grid capacity, and User Manager package-to-template matching.
+ * proportional text sizing, official ISO A4 dimensions, aspect-ratio-locked A4 layout,
+ * and User Manager package-to-template matching.
  *
- * All element coordinates (relX, relY) are stored in physical LTR/top-to-bottom percentage space:
+ * All element coordinates (relX, relY) are stored in physical LTR / top-to-bottom percentage space:
  * - relX = 0.0 -> physical left edge of card, 1.0 -> physical right edge of card
  * - relY = 0.0 -> physical top edge of card, 1.0 -> physical bottom edge of card
- * Both interactive Compose preview and Android Canvas A4 PDF renderer use these exact formulas.
  */
 object CardLayoutMetrics {
+
+    // Official ISO A4 dimensions in PostScript points (210mm x 297mm @ 72pt/inch)
+    // Ensures 1:1 physical printing on Android PrintManager & every PDF viewer with zero scaling drift
+    const val A4_PDF_WIDTH = 595
+    const val A4_PDF_HEIGHT = 842
+    const val A4_PREVIEW_WIDTH = 952
+    const val A4_PREVIEW_HEIGHT = 1347 // Exact 595:842 (210:297) ratio
+
+    const val A4_MARGIN_RATIO = 16f / 595f
+    const val A4_HEADER_RATIO = 24f / 842f
+    const val A4_GAP_RATIO = 2.5f / 595f
 
     const val DEFAULT_USERNAME_X = 0.50f
     const val DEFAULT_USERNAME_Y = 0.52f
@@ -31,9 +72,9 @@ object CardLayoutMetrics {
     const val MIN_QR_REL_Y = 0.14f
     const val MAX_QR_REL_Y = 0.86f
 
-    // Printable A4 reference area calibrated so default 203x61 fits 4 cols x 25 rows = 100 cards
+    // True ISO A4 printable reference space (ratio 832 : 1162 matches official A4 printable area)
     private const val A4_PRINTABLE_REF_W = 832f
-    private const val A4_PRINTABLE_REF_H = 1625f
+    private const val A4_PRINTABLE_REF_H = 1162f
     private const val A4_CARD_GAP = 4f
 
     fun sanitizeRel(value: Float, fallback: Float, min: Float, max: Float): Float {
@@ -86,28 +127,83 @@ object CardLayoutMetrics {
     fun computeCardAspectRatio(template: CardTemplateEntity): Float {
         val safeW = if (template.cardWidth.isFinite()) template.cardWidth.coerceIn(60f, 500f) else 203f
         val safeH = if (template.cardHeight.isFinite()) template.cardHeight.coerceIn(30f, 300f) else 61f
-        return (safeW / safeH).coerceIn(1.1f, 4.8f)
+        return (safeW / safeH).coerceIn(0.8f, 4.8f)
     }
 
     /**
-     * Exact proportional pixel text size shared by both Compose Preview and Android Canvas A4 PDF.
-     * Scales strictly with rendered card height and fontSizeSp (10..28, baseline 16).
+     * Computes exact, undistorted aspect-ratio-locked card placement on an ISO A4 page.
+     * Guarantees every card cell has cardWidthPx / cardHeightPx == cardWidth / cardHeight
+     * with zero horizontal stretching or vertical squishing.
+     */
+    fun computeA4SheetLayout(
+        template: CardTemplateEntity,
+        pageWidth: Float,
+        pageHeight: Float,
+        showPageHeader: Boolean
+    ): A4SheetLayout {
+        val safe = sanitize(template)
+        val cols = safe.columnsPerPage.coerceIn(1, 6)
+        val rows = safe.rowsPerPage.coerceIn(1, 30)
+        val margin = pageWidth * A4_MARGIN_RATIO
+        val headerH = if (showPageHeader) pageHeight * A4_HEADER_RATIO else 0f
+        val gap = pageWidth * A4_GAP_RATIO
+
+        val availW = (pageWidth - margin * 2f).coerceAtLeast(100f)
+        val availH = (pageHeight - margin * 2f - headerH).coerceAtLeast(100f)
+
+        val slotW = ((availW - gap * (cols - 1)) / cols).coerceAtLeast(16f)
+        val slotH = ((availH - gap * (rows - 1)) / rows).coerceAtLeast(10f)
+        val cardRatio = computeCardAspectRatio(safe)
+
+        val fitW: Float
+        val fitH: Float
+        if (slotW / slotH > cardRatio) {
+            fitH = slotH
+            fitW = slotH * cardRatio
+        } else {
+            fitW = slotW
+            fitH = slotW / cardRatio
+        }
+
+        val totalGridW = cols * fitW + (cols - 1) * gap
+        val totalGridH = rows * fitH + (rows - 1) * gap
+        val startX = margin + ((availW - totalGridW) / 2f).coerceAtLeast(0f)
+        val startY = margin + headerH + ((availH - totalGridH) / 2f).coerceAtLeast(0f)
+
+        return A4SheetLayout(
+            pageWidth = pageWidth,
+            pageHeight = pageHeight,
+            margin = margin,
+            headerHeight = headerH,
+            gap = gap,
+            columns = cols,
+            rows = rows,
+            cardWidthPx = fitW,
+            cardHeightPx = fitH,
+            gridStartX = startX,
+            gridStartY = startY
+        )
+    }
+
+    /**
+     * Exact proportional pixel text size shared by Interactive Preview, Full A4 Preview,
+     * Print Preview, Direct Print, and Exported PDF.
      */
     fun computeUsernameTextPx(fontSizeSp: Float, cardWidthPx: Float, cardHeightPx: Float): Float {
         val factor = fontSizeSp.coerceIn(10f, 28f) / 16f
         val base = cardHeightPx * 0.29f * factor
-        val minPx = (cardHeightPx * 0.13f).coerceAtLeast(6f)
+        val minPx = (cardHeightPx * 0.13f).coerceAtLeast(4f)
         val maxPx = minOf(cardHeightPx * 0.62f, cardWidthPx * 0.22f).coerceAtLeast(minPx)
         return base.coerceIn(minPx, maxPx)
     }
 
     fun computePasswordTextPx(fontSizeSp: Float, cardWidthPx: Float, cardHeightPx: Float): Float {
         val uPx = computeUsernameTextPx(fontSizeSp, cardWidthPx, cardHeightPx)
-        return (uPx * 0.84f).coerceAtLeast(5.5f)
+        return (uPx * 0.84f).coerceAtLeast(3.5f)
     }
 
     fun computeQrSizePx(cardWidthPx: Float, cardHeightPx: Float): Float {
-        return (minOf(cardWidthPx, cardHeightPx) * 0.44f).coerceIn(16f, minOf(cardWidthPx, cardHeightPx) * 0.72f)
+        return (minOf(cardWidthPx, cardHeightPx) * 0.44f).coerceIn(10f, minOf(cardWidthPx, cardHeightPx) * 0.72f)
     }
 
     fun calculateFittingColumns(cardWidth: Float): Int {

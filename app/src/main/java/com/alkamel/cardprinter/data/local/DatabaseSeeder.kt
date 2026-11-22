@@ -20,7 +20,7 @@ object DatabaseSeeder {
                         cardWidth = 203f,
                         cardHeight = 61f,
                         columnsPerPage = 4,
-                        rowsPerPage = 25,
+                        rowsPerPage = 17,
                         showUsername = true,
                         showPassword = false,
                         showQrCode = false,

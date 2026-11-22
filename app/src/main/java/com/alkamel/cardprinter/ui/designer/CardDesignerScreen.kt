@@ -33,6 +33,10 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Visibility
@@ -46,6 +50,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -84,6 +89,7 @@ import coil.request.ImageRequest
 import com.alkamel.cardprinter.data.printing.CardLayoutMetrics
 import com.alkamel.cardprinter.ui.components.AlkamelTopHeader
 import com.alkamel.cardprinter.ui.components.CardDesignPreviewBox
+import com.alkamel.cardprinter.ui.components.DesignerElement
 import com.alkamel.cardprinter.ui.components.parseHexColorSafe
 import com.alkamel.cardprinter.ui.theme.AlkamelTheme
 import java.io.File
@@ -123,6 +129,12 @@ fun CardDesignerScreen(
         (listOf("الكل") + state.packages.map { it.name.trim() }.filter { it.isNotBlank() }).distinct()
     }
     val hasBackgroundImage = !state.activeTemplate.backgroundImagePath.isNullOrBlank()
+
+    val (activeX, activeY) = when (state.selectedElement) {
+        DesignerElement.USERNAME -> state.activeTemplate.usernameX to state.activeTemplate.usernameY
+        DesignerElement.PASSWORD -> state.activeTemplate.passwordX to state.activeTemplate.passwordY
+        DesignerElement.QR_CODE -> state.activeTemplate.qrX to state.activeTemplate.qrY
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -173,7 +185,7 @@ fun CardDesignerScreen(
                                 width = if (isSelected) 2.dp else 1.dp,
                                 color = if (isSelected) ext.royalActionBlue else MaterialTheme.colorScheme.outlineVariant
                             ),
-                            modifier = Modifier.width(172.dp)
+                            modifier = Modifier.width(176.dp)
                         ) {
                             Row(
                                 modifier = Modifier.padding(8.dp),
@@ -234,7 +246,7 @@ fun CardDesignerScreen(
                 }
             }
 
-            // 1. Interactive Single Card Preview + Live Coordinates + Background Image + A4 Full Preview + Remove Image
+            // 1. Interactive Single Card Preview + Fine-Tune Controls + Background Image + A4 Full Preview + Remove Image
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -273,31 +285,64 @@ fun CardDesignerScreen(
                         selectedElement = state.selectedElement,
                         isInteractive = true,
                         onElementDragged = viewModel::onElementDragged,
+                        onElementSelected = viewModel::onSelectedElementChange,
                         modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(ratio)
                     )
 
+                    // Precision 1% Position Nudge Bar + Live Percentage Readout
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val uxPct = (state.activeTemplate.usernameX * 100f).roundToInt()
-                        val uyPct = (state.activeTemplate.usernameY * 100f).roundToInt()
-                        Text(
-                            text = "موقع رقم الكرت: أفقياً $uxPct% • عمودياً $uyPct%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        TextButton(
-                            onClick = viewModel::resetElementPositions,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "موقع ${state.selectedElement.arabicLabel}: X ${(activeX * 100f).roundToInt()}% • Y ${(activeY * 100f).roundToInt()}%",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Bold
+                            )
+                            TextButton(
+                                onClick = viewModel::resetElementPositions,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("ضبط بالمنتصف", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("ضبط بالمنتصف", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            FilledTonalIconButton(
+                                onClick = { viewModel.nudgeSelectedElement(0.01f, 0f) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Rounded.KeyboardArrowRight, contentDescription = "تحريك يمين", modifier = Modifier.size(18.dp))
+                            }
+                            FilledTonalIconButton(
+                                onClick = { viewModel.nudgeSelectedElement(-0.01f, 0f) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Rounded.KeyboardArrowLeft, contentDescription = "تحريك يسار", modifier = Modifier.size(18.dp))
+                            }
+                            FilledTonalIconButton(
+                                onClick = { viewModel.nudgeSelectedElement(0f, -0.01f) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "تحريك أعلى", modifier = Modifier.size(18.dp))
+                            }
+                            FilledTonalIconButton(
+                                onClick = { viewModel.nudgeSelectedElement(0f, 0.01f) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "تحريك أسفل", modifier = Modifier.size(18.dp))
+                            }
                         }
                     }
 
@@ -583,7 +628,7 @@ fun CardDesignerScreen(
         }
     }
 
-    // Full A4 Page Preview Dialog
+    // Full A4 Page Preview Dialog (rendered with exact same engine as PdfPrintEngine)
     if (state.showA4PreviewDialog) {
         Dialog(
             onDismissRequest = viewModel::closeFullA4Preview,
@@ -610,7 +655,7 @@ fun CardDesignerScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "معاينة صفحة A4 الكاملة",
+                                text = "معاينة صفحة A4 الكاملة (مطابقة لـ PDF)",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.ExtraBold
                             )
