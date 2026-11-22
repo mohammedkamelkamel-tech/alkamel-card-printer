@@ -243,9 +243,10 @@ class UserManagerCardsViewModel(
 
     fun dispatchSingleCardToA4Print(card: CardEntity): Boolean {
         val state = _uiState.value
-        val matchingTemplate = state.templates.firstOrNull {
-            it.packageName.equals(card.packageName, ignoreCase = true)
-        } ?: state.templates.firstOrNull { it.isDefault } ?: state.templates.firstOrNull()
+        val matchingTemplate = com.alkamel.cardprinter.data.printing.CardLayoutMetrics.selectBestTemplateForPackage(
+            templates = state.templates,
+            packageName = card.packageName
+        )
 
         PrintQueueHolder.setQueue(cards = listOf(card), template = matchingTemplate)
         return true
@@ -393,9 +394,10 @@ class UserManagerCardsViewModel(
             return false
         }
         val firstPkg = targetCards.first().packageName
-        val matchingTemplate = state.templates.firstOrNull {
-            it.packageName.equals(firstPkg, ignoreCase = true)
-        } ?: state.templates.firstOrNull { it.isDefault } ?: state.templates.firstOrNull()
+        val matchingTemplate = com.alkamel.cardprinter.data.printing.CardLayoutMetrics.selectBestTemplateForPackage(
+            templates = state.templates,
+            packageName = firstPkg
+        )
 
         PrintQueueHolder.setQueue(cards = targetCards, template = matchingTemplate)
         return true

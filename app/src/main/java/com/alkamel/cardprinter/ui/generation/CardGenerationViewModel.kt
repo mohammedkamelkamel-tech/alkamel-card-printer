@@ -250,9 +250,10 @@ class CardGenerationViewModel(
             return false
         }
         val pkgName = state.selectedPackageName
-        val matchingTemplate = state.templates.firstOrNull {
-            it.packageName.equals(pkgName, ignoreCase = true)
-        } ?: state.templates.firstOrNull { it.isDefault } ?: state.templates.firstOrNull()
+        val matchingTemplate = com.alkamel.cardprinter.data.printing.CardLayoutMetrics.selectBestTemplateForPackage(
+            templates = state.templates,
+            packageName = pkgName
+        )
 
         PrintQueueHolder.setQueue(cards = cards, template = matchingTemplate)
         return true

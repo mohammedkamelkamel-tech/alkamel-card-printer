@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.Button
@@ -45,7 +46,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +57,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -67,19 +68,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.alkamel.cardprinter.data.printing.CardLayoutMetrics
 import com.alkamel.cardprinter.ui.components.AlkamelTopHeader
 import com.alkamel.cardprinter.ui.components.CardDesignPreviewBox
 import com.alkamel.cardprinter.ui.components.parseHexColorSafe
 import com.alkamel.cardprinter.ui.theme.AlkamelTheme
+import java.io.File
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,7 +117,7 @@ fun CardDesignerScreen(
         }
     }
 
-    val colorSwatches = listOf("#FFFFFF", "#0F172A", "#FFEB3B", "#FF5252", "#29B6F6", "#69F0AE")
+    val colorSwatches = listOf("#000000", "#0F172A", "#FFFFFF", "#D32F2F", "#1565C0", "#FFEB3B", "#2E7D32")
     // Exclusively User Manager packages synced from MikroTik User Manager
     val userManagerPackageChoices = remember(state.packages) {
         (listOf("الكل") + state.packages.map { it.name.trim() }.filter { it.isNotBlank() }).distinct()
@@ -139,24 +147,94 @@ fun CardDesignerScreen(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // Visual Template Selector Strip: displays each template's own independent image, name, and bound User Manager package
             if (state.templates.isNotEmpty()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     state.templates.forEach { tpl ->
-                        FilterChip(
-                            selected = tpl.id == state.activeTemplate.id,
+                        val isSelected = tpl.id == state.activeTemplate.id
+                        val thumbFile = remember(tpl.backgroundImagePath) {
+                            tpl.backgroundImagePath
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { File(it) }
+                                ?.takeIf { it.exists() && it.length() > 0L }
+                        }
+                        Card(
                             onClick = { viewModel.selectTemplate(tpl) },
-                            label = { Text("${tpl.name} (${tpl.columnsPerPage}×${tpl.rowsPerPage})") }
-                        )
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) ext.royalActionBlue.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface
+                            ),
+                            border = BorderStroke(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) ext.royalActionBlue else MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            modifier = Modifier.width(172.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(width = 48.dp, height = 34.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(
+                                            Brush.linearGradient(listOf(Color(0xFF0F2342), Color(0xFF1D4E89)))
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (thumbFile != null) {
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(context).data(thumbFile).crossfade(false).build(),
+                                            contentDescription = tpl.name,
+                                            contentScale = ContentScale.FillBounds,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Image,
+                                            contentDescription = null,
+                                            tint = Color.White.copy(alpha = 0.8f),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = tpl.name,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "باقة: ${tpl.packageName}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = ext.royalActionBlue,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${tpl.columnsPerPage}×${tpl.rowsPerPage} (${tpl.columnsPerPage * tpl.rowsPerPage} كرت)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // 1. Interactive Single Card Preview + Background Image + A4 Full Preview + Remove Image
+            // 1. Interactive Single Card Preview + Live Coordinates + Background Image + A4 Full Preview + Remove Image
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -167,14 +245,27 @@ fun CardDesignerScreen(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(
-                        text = "معاينة تفاعلية — اسحب النصوص أو رمز QR لتحديد موقعها",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = ext.royalActionBlue
-                    )
-                    val ratio = (state.activeTemplate.cardWidth / state.activeTemplate.cardHeight.coerceAtLeast(25f))
-                        .coerceIn(1.4f, 4.2f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "معاينة تفاعلية — اسحب رقم الكرت لتحديد موقعه",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = ext.royalActionBlue,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "باقة: ${state.activeTemplate.packageName}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = ext.voucherGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    val ratio = CardLayoutMetrics.computeCardAspectRatio(state.activeTemplate)
                     CardDesignPreviewBox(
                         template = state.activeTemplate,
                         sampleUsername = "15650109767",
@@ -187,6 +278,29 @@ fun CardDesignerScreen(
                             .aspectRatio(ratio)
                     )
 
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val uxPct = (state.activeTemplate.usernameX * 100f).roundToInt()
+                        val uyPct = (state.activeTemplate.usernameY * 100f).roundToInt()
+                        Text(
+                            text = "موقع رقم الكرت: أفقياً $uxPct% • عمودياً $uyPct%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        TextButton(
+                            onClick = viewModel::resetElementPositions,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ضبط بالمنتصف", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
                     OutlinedButton(
                         onClick = { imagePicker.launch("image/*") },
                         shape = RoundedCornerShape(10.dp),
@@ -194,7 +308,7 @@ fun CardDesignerScreen(
                     ) {
                         Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("اختيار صورة الخلفية", fontWeight = FontWeight.SemiBold)
+                        Text("اختيار صورة خلفية لهذا القالب", fontWeight = FontWeight.SemiBold)
                     }
 
                     // «معاينة» button right next to «إزالة الصورة»
@@ -249,14 +363,19 @@ fun CardDesignerScreen(
                     )
 
                     Text("لون النص:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         colorSwatches.forEach { hex ->
                             val selected = state.activeTemplate.textColorHex.equals(hex, ignoreCase = true)
                             Box(
                                 modifier = Modifier
                                     .size(36.dp)
                                     .clip(CircleShape)
-                                    .background(parseHexColorSafe(hex, Color.White))
+                                    .background(parseHexColorSafe(hex, Color.Black))
                                     .border(
                                         width = if (selected) 3.dp else 1.dp,
                                         color = if (selected) ext.royalActionBlue else Color.Gray,
@@ -496,7 +615,7 @@ fun CardDesignerScreen(
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "${state.cardsPerA4Page} كرت في الصفحة (${state.activeTemplate.columnsPerPage} أعمدة × ${state.activeTemplate.rowsPerPage} صفوف)",
+                                text = "${state.cardsPerA4Page} كرت في الصفحة (${state.activeTemplate.columnsPerPage} أعمدة × ${state.activeTemplate.rowsPerPage} صفوف) • باقة: ${state.activeTemplate.packageName}",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = ext.voucherGreen,
                                 fontWeight = FontWeight.Bold

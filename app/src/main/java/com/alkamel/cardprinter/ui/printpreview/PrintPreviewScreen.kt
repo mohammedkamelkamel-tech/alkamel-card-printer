@@ -141,7 +141,7 @@ fun PrintPreviewScreen(
                         FilterChip(
                             selected = tpl.id == state.activeTemplate.id,
                             onClick = { viewModel.selectTemplate(tpl) },
-                            label = { Text("${tpl.name} (${tpl.columnsPerPage}×${tpl.rowsPerPage})") }
+                            label = { Text("${tpl.name} • ${tpl.packageName} (${tpl.columnsPerPage}×${tpl.rowsPerPage})") }
                         )
                     }
                 }
@@ -227,7 +227,7 @@ fun PrintPreviewScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "الكامل-طباعة الكروت • ${state.activeTemplate.name}",
+                                text = "الكامل-طباعة الكروت • ${state.activeTemplate.name} (${state.activeTemplate.packageName})",
                                 color = Color(0xFF0F172A),
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold
@@ -254,8 +254,7 @@ fun PrintPreviewScreen(
                             )
                         }
                     } else {
-                        val cardRatio = (state.activeTemplate.cardWidth / state.activeTemplate.cardHeight.coerceAtLeast(25f))
-                            .coerceIn(1.5f, 4.2f)
+                        val cardRatio = com.alkamel.cardprinter.data.printing.CardLayoutMetrics.computeCardAspectRatio(state.activeTemplate)
                         val chunkedRows = pageCards.chunked(cols)
                         chunkedRows.forEach { rowCards ->
                             Row(

@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface CardTemplateDao {
 
-    @Query("SELECT * FROM card_templates ORDER BY isDefault DESC, updatedAt DESC")
+    @Query("SELECT * FROM card_templates ORDER BY updatedAt DESC, isDefault DESC")
     fun observeAllTemplates(): Flow<List<CardTemplateEntity>>
 
     @Query("SELECT COUNT(*) FROM card_templates")

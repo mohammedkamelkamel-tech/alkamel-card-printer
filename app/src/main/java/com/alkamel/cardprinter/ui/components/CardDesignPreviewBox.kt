@@ -6,14 +6,19 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -22,15 +27,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
+import com.alkamel.cardprinter.data.printing.CardLayoutMetrics
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -54,111 +65,156 @@ fun CardDesignPreviewBox(
     onElementDragged: (DesignerElement, Float, Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val safeTemplate = remember(template) { CardLayoutMetrics.sanitize(template) }
     val context = LocalContext.current
     val density = LocalDensity.current
-    val textColor = remember(template.textColorHex) { parseHexColorSafe(template.textColorHex, Color.White) }
-    val bgFile = remember(template.backgroundImagePath) {
-        template.backgroundImagePath?.takeIf { it.isNotBlank() }?.let { File(it) }?.takeIf { it.exists() }
+    val latestOnDragged by rememberUpdatedState(onElementDragged)
+
+    val textColor = remember(safeTemplate.textColorHex) {
+        parseHexColorSafe(safeTemplate.textColorHex, Color.White)
+    }
+    val bgFile = remember(safeTemplate.backgroundImagePath) {
+        safeTemplate.backgroundImagePath
+            ?.takeIf { it.isNotBlank() }
+            ?.let { File(it) }
+            ?.takeIf { it.exists() && it.length() > 0L }
     }
 
-    BoxWithConstraints(
-        modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(Color(0xFF0F2342), Color(0xFF1D4E89))
-                )
-            )
-    ) {
-        val widthPx = with(density) { maxWidth.toPx().coerceAtLeast(1f) }
-        val heightPx = with(density) { maxHeight.toPx().coerceAtLeast(1f) }
-        val fontScale = (widthPx / 620f).coerceIn(0.35f, 1.35f)
-        val scaledFontSp = (template.fontSizeSp * fontScale).coerceIn(7f, 26f)
-
-        if (bgFile != null) {
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(bgFile).crossfade(false).build(),
-                contentDescription = "خلفية القالب",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Text(
-                text = "الكامل نت • ${template.packageName}",
-                color = Color.White.copy(alpha = 0.85f),
-                fontSize = (scaledFontSp * 0.65f).sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
-            )
-        }
-
-        if (template.showUsername) {
-            DraggableOverlayText(
-                text = sampleUsername,
-                relX = template.usernameX,
-                relY = template.usernameY,
-                widthPx = widthPx,
-                heightPx = heightPx,
-                color = textColor,
-                fontSizeSp = scaledFontSp,
-                isSelected = selectedElement == DesignerElement.USERNAME,
-                isInteractive = isInteractive,
-                onDrag = { dx, dy -> onElementDragged(DesignerElement.USERNAME, dx / widthPx, dy / heightPx) }
-            )
-        }
-
-        if (template.showPassword && samplePassword.isNotBlank()) {
-            DraggableOverlayText(
-                text = samplePassword,
-                relX = template.passwordX,
-                relY = template.passwordY,
-                widthPx = widthPx,
-                heightPx = heightPx,
-                color = textColor,
-                fontSizeSp = (scaledFontSp * 0.85f).coerceAtLeast(6.5f),
-                isSelected = selectedElement == DesignerElement.PASSWORD,
-                isInteractive = isInteractive,
-                onDrag = { dx, dy -> onElementDragged(DesignerElement.PASSWORD, dx / widthPx, dy / heightPx) }
-            )
-        }
-
-        if (template.showQrCode) {
-            val qrDp = (minOf(maxWidth, maxHeight) * 0.44f).coerceIn(18.dp, 72.dp)
-            val qrContent = if (samplePassword.isNotBlank()) "U:$sampleUsername|P:$samplePassword" else sampleUsername
-            val qrBmp = remember(qrContent) { QrCodeBitmapGenerator.generateQrBitmap(qrContent, 120) }
-            if (qrBmp != null) {
-                val qrSizePx = with(density) { qrDp.toPx() }
-                val x = (template.qrX.coerceIn(0.08f, 0.92f) * widthPx - qrSizePx / 2f).roundToInt()
-                val y = (template.qrY.coerceIn(0.12f, 0.88f) * heightPx - qrSizePx / 2f).roundToInt()
-                Box(
-                    modifier = Modifier
-                        .offset { IntOffset(x, y) }
-                        .size(qrDp)
-                        .background(Color.White, RoundedCornerShape(3.dp))
-                        .then(
-                            if (selectedElement == DesignerElement.QR_CODE) {
-                                Modifier.border(1.5.dp, Color(0xFFFFCA28), RoundedCornerShape(3.dp))
-                            } else Modifier
-                        )
-                        .then(
-                            if (isInteractive) {
-                                Modifier.pointerInput(DesignerElement.QR_CODE) {
-                                    detectDragGestures { change, dragAmount ->
-                                        change.consume()
-                                        onElementDragged(DesignerElement.QR_CODE, dragAmount.x / widthPx, dragAmount.y / heightPx)
-                                    }
-                                }
-                            } else Modifier
-                        )
-                        .padding(1.dp)
-                ) {
-                    Image(
-                        bitmap = qrBmp.asImageBitmap(),
-                        contentDescription = "QR",
-                        modifier = Modifier.fillMaxSize()
+    // Force physical LTR coordinate space inside the card surface so (0..1, 0..1)
+    // matches Android Canvas (CardBitmapRenderer / A4 PDF) with zero RTL horizontal inversion.
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+        BoxWithConstraints(
+            modifier = modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(Color(0xFF0F2342), Color(0xFF1D4E89))
                     )
+                )
+        ) {
+            val widthPx = with(density) { maxWidth.toPx().coerceAtLeast(1f) }
+            val heightPx = with(density) { maxHeight.toPx().coerceAtLeast(1f) }
+
+            // Exact pixel text size identical to CardBitmapRenderer, immune to system fontScale drift
+            val pxPerSp = (density.density * density.fontScale).coerceAtLeast(0.5f)
+            val usernamePx = CardLayoutMetrics.computeUsernameTextPx(safeTemplate.fontSizeSp, widthPx, heightPx)
+            val passwordPx = CardLayoutMetrics.computePasswordTextPx(safeTemplate.fontSizeSp, widthPx, heightPx)
+            val usernameSp = (usernamePx / pxPerSp).sp
+            val passwordSp = (passwordPx / pxPerSp).sp
+
+            if (bgFile != null) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(bgFile)
+                        .crossfade(false)
+                        .build(),
+                    contentDescription = "خلفية القالب",
+                    contentScale = ContentScale.FillBounds,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                val titleSp = ((heightPx * 0.14f).coerceIn(7f, 24f) / pxPerSp).sp
+                Text(
+                    text = "الكامل نت • ${safeTemplate.packageName}",
+                    color = Color.White.copy(alpha = 0.88f),
+                    fontSize = titleSp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+
+            if (safeTemplate.showUsername) {
+                DraggableOverlayText(
+                    element = DesignerElement.USERNAME,
+                    text = sampleUsername,
+                    relX = safeTemplate.usernameX,
+                    relY = safeTemplate.usernameY,
+                    widthPx = widthPx,
+                    heightPx = heightPx,
+                    color = textColor,
+                    fontSizeSp = usernameSp,
+                    isSelected = isInteractive && selectedElement == DesignerElement.USERNAME,
+                    isInteractive = isInteractive,
+                    onDrag = { dxPx, dyPx ->
+                        if (widthPx > 1f && heightPx > 1f) {
+                            latestOnDragged(DesignerElement.USERNAME, dxPx / widthPx, dyPx / heightPx)
+                        }
+                    }
+                )
+            }
+
+            if (safeTemplate.showPassword && samplePassword.isNotBlank()) {
+                DraggableOverlayText(
+                    element = DesignerElement.PASSWORD,
+                    text = samplePassword,
+                    relX = safeTemplate.passwordX,
+                    relY = safeTemplate.passwordY,
+                    widthPx = widthPx,
+                    heightPx = heightPx,
+                    color = textColor,
+                    fontSizeSp = passwordSp,
+                    isSelected = isInteractive && selectedElement == DesignerElement.PASSWORD,
+                    isInteractive = isInteractive,
+                    onDrag = { dxPx, dyPx ->
+                        if (widthPx > 1f && heightPx > 1f) {
+                            latestOnDragged(DesignerElement.PASSWORD, dxPx / widthPx, dyPx / heightPx)
+                        }
+                    }
+                )
+            }
+
+            if (safeTemplate.showQrCode) {
+                val qrSizePx = CardLayoutMetrics.computeQrSizePx(widthPx, heightPx)
+                val qrDp = with(density) { qrSizePx.toDp() }
+                val qrContent = if (samplePassword.isNotBlank()) "U:$sampleUsername|P:$samplePassword" else sampleUsername
+                val qrBmp = remember(qrContent) { QrCodeBitmapGenerator.generateQrBitmap(qrContent, 140) }
+                if (qrBmp != null) {
+                    val maxLeft = (widthPx - qrSizePx).coerceAtLeast(0f)
+                    val maxTop = (heightPx - qrSizePx).coerceAtLeast(0f)
+                    val leftPx = (safeTemplate.qrX * widthPx - qrSizePx / 2f).coerceIn(0f, maxLeft).roundToInt()
+                    val topPx = (safeTemplate.qrY * heightPx - qrSizePx / 2f).coerceIn(0f, maxTop).roundToInt()
+                    val latestWidth by rememberUpdatedState(widthPx)
+                    val latestHeight by rememberUpdatedState(heightPx)
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .absoluteOffset { IntOffset(leftPx, topPx) }
+                            .size(qrDp)
+                            .background(Color.White, RoundedCornerShape(3.dp))
+                            .then(
+                                if (isInteractive && selectedElement == DesignerElement.QR_CODE) {
+                                    Modifier.border(1.5.dp, Color(0xFFFFCA28), RoundedCornerShape(3.dp))
+                                } else Modifier
+                            )
+                            .then(
+                                if (isInteractive) {
+                                    Modifier.pointerInput(DesignerElement.QR_CODE) {
+                                        detectDragGestures { change, dragAmount ->
+                                            change.consume()
+                                            if (latestWidth > 1f && latestHeight > 1f) {
+                                                latestOnDragged(
+                                                    DesignerElement.QR_CODE,
+                                                    dragAmount.x / latestWidth,
+                                                    dragAmount.y / latestHeight
+                                                )
+                                            }
+                                        }
+                                    }
+                                } else Modifier
+                            )
+                            .padding(1.dp)
+                    ) {
+                        Image(
+                            bitmap = qrBmp.asImageBitmap(),
+                            contentDescription = "QR",
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
             }
         }
@@ -167,47 +223,60 @@ fun CardDesignPreviewBox(
 
 @Composable
 private fun DraggableOverlayText(
+    element: DesignerElement,
     text: String,
     relX: Float,
     relY: Float,
     widthPx: Float,
     heightPx: Float,
     color: Color,
-    fontSizeSp: Float,
+    fontSizeSp: androidx.compose.ui.unit.TextUnit,
     isSelected: Boolean,
     isInteractive: Boolean,
     onDrag: (Float, Float) -> Unit
 ) {
-    val approxHalfW = (text.length * fontSizeSp * 0.34f).coerceIn(12f, widthPx * 0.45f)
-    val x = (relX.coerceIn(0.05f, 0.95f) * widthPx - approxHalfW).roundToInt()
-    val y = (relY.coerceIn(0.10f, 0.90f) * heightPx - fontSizeSp).roundToInt()
+    var measuredSize by remember { mutableStateOf(IntSize.Zero) }
+    val latestOnDrag by rememberUpdatedState(onDrag)
+
+    val centerX = relX * widthPx
+    val centerY = relY * heightPx
+    val maxLeft = (widthPx - measuredSize.width).coerceAtLeast(0f)
+    val maxTop = (heightPx - measuredSize.height).coerceAtLeast(0f)
+    val leftPx = (centerX - measuredSize.width / 2f).coerceIn(0f, maxLeft).roundToInt()
+    val topPx = (centerY - measuredSize.height / 2f).coerceIn(0f, maxTop).roundToInt()
 
     Box(
         modifier = Modifier
-            .offset { IntOffset(x, y) }
+            .absoluteOffset { IntOffset(leftPx, topPx) }
+            .onSizeChanged { measuredSize = it }
             .then(
                 if (isSelected) {
-                    Modifier.border(1.dp, Color(0xFFFFCA28), RoundedCornerShape(4.dp))
+                    Modifier
+                        .background(Color.Black.copy(alpha = 0.14f), RoundedCornerShape(4.dp))
+                        .border(1.2.dp, Color(0xFFFFCA28), RoundedCornerShape(4.dp))
                 } else Modifier
             )
             .then(
                 if (isInteractive) {
-                    Modifier.pointerInput(text) {
+                    Modifier.pointerInput(element) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
-                            onDrag(dragAmount.x, dragAmount.y)
+                            latestOnDrag(dragAmount.x, dragAmount.y)
                         }
                     }
                 } else Modifier
             )
-            .padding(horizontal = 2.dp)
+            .padding(horizontal = if (isInteractive) 3.dp else 1.dp, vertical = 1.dp),
+        contentAlignment = Alignment.Center
     ) {
         Text(
             text = text,
             color = color,
-            fontSize = fontSizeSp.sp,
+            fontSize = fontSizeSp,
+            lineHeight = fontSizeSp,
             fontWeight = FontWeight.Bold,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false
         )
     }
 }

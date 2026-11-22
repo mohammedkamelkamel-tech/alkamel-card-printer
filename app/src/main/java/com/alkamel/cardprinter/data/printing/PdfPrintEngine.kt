@@ -54,17 +54,19 @@ object PdfPrintEngine {
         showPageHeader: Boolean = true
     ): PdfResult = withContext(Dispatchers.IO) {
         if (cards.isEmpty()) return@withContext PdfResult.Error("لا توجد كروت لتوليد ملف PDF A4.")
+        val safeTemplate = CardLayoutMetrics.sanitize(template)
         val doc = PdfDocument()
+        val preloadedBg = CardBitmapRenderer.decodeBackgroundBitmap(safeTemplate)
         try {
-            val cols = template.columnsPerPage.coerceIn(1, 6)
-            val rows = template.rowsPerPage.coerceIn(1, 30)
+            val cols = safeTemplate.columnsPerPage.coerceIn(1, 6)
+            val rows = safeTemplate.rowsPerPage.coerceIn(1, 30)
             val perPage = cols * rows
             val pages = ceil(cards.size.toDouble() / perPage).toInt().coerceAtLeast(1)
 
             val topHeaderSpace = if (showPageHeader) HEADER_H else 0f
             val gap = 4f
             val cellW = (A4_W - MARGIN * 2 - gap * (cols - 1)) / cols
-            val ratio = template.cardHeight.coerceAtLeast(20f) / template.cardWidth.coerceAtLeast(40f)
+            val ratio = safeTemplate.cardHeight.coerceAtLeast(20f) / safeTemplate.cardWidth.coerceAtLeast(40f)
             val maxRowH = (A4_H - MARGIN * 2 - topHeaderSpace - gap * (rows - 1)) / rows
             val cellH = minOf(cellW * ratio, maxRowH)
 
@@ -86,13 +88,17 @@ object PdfPrintEngine {
                 strokeWidth = 1f
             }
 
+            // Render card bitmaps at 2x print resolution for sharp card numbers on A4
+            val renderW = (cellW * 2f).roundToInt().coerceIn(320, 720)
+            val renderH = (cellH * 2f).roundToInt().coerceIn(96, 480)
+
             for (p in 0 until pages) {
                 val page = doc.startPage(PdfDocument.PageInfo.Builder(A4_W, A4_H, p + 1).create())
                 val c = page.canvas
                 c.drawColor(Color.WHITE)
 
                 if (showPageHeader) {
-                    c.drawText("$title • ${template.name} (${cards.size} كرت)", A4_W - MARGIN, MARGIN + 22f, titlePaint)
+                    c.drawText("$title • ${safeTemplate.name} (${cards.size} كرت)", A4_W - MARGIN, MARGIN + 22f, titlePaint)
                     c.drawText("A4 • صفحة ${p + 1}/$pages  |  $dateStr", MARGIN, MARGIN + 22f, metaPaint)
                 }
 
@@ -105,9 +111,10 @@ object PdfPrintEngine {
                     val dest = RectF(left, top, left + cellW, top + cellH)
                     val bmp = CardBitmapRenderer.renderCardBitmap(
                         card = card,
-                        template = template,
-                        widthPx = cellW.roundToInt().coerceAtLeast(220),
-                        heightPx = cellH.roundToInt().coerceAtLeast(64)
+                        template = safeTemplate,
+                        widthPx = renderW,
+                        heightPx = renderH,
+                        preloadedBackground = preloadedBg
                     )
                     c.drawBitmap(bmp, null, dest, Paint(Paint.FILTER_BITMAP_FLAG))
                     if (showCutGuides) c.drawRect(dest, cutPaint)
@@ -119,6 +126,7 @@ object PdfPrintEngine {
         } catch (e: Exception) {
             PdfResult.Error("تعذر توليد ملف PDF A4: ${e.localizedMessage ?: "خطأ غير متوقع"}")
         } finally {
+            preloadedBg?.recycle()
             doc.close()
         }
     }

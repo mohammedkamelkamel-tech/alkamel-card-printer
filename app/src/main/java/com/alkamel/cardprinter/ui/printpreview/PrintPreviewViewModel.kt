@@ -11,6 +11,7 @@ import com.alkamel.cardprinter.data.local.model.SaleOperationType
 import com.alkamel.cardprinter.data.local.util.DateTimeUtils
 import com.alkamel.cardprinter.data.preferences.AppPreferencesManager
 import com.alkamel.cardprinter.data.preferences.AppSettingsState
+import com.alkamel.cardprinter.data.printing.CardLayoutMetrics
 import com.alkamel.cardprinter.data.printing.PdfPrintEngine
 import com.alkamel.cardprinter.data.printing.PdfResult
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
@@ -28,7 +29,7 @@ import kotlin.math.ceil
 data class PrintPreviewUiState(
     val cardsToPrint: List<CardEntity> = emptyList(),
     val templates: List<CardTemplateEntity> = emptyList(),
-    val activeTemplate: CardTemplateEntity = CardTemplateEntity(name = "قالب الكامل A4"),
+    val activeTemplate: CardTemplateEntity = CardLayoutMetrics.sanitize(CardTemplateEntity(name = "قالب الكامل A4")),
     val settings: AppSettingsState = AppSettingsState(),
     val currentPageIndex: Int = 0,
     val totalPages: Int = 1,
@@ -46,6 +47,8 @@ class PrintPreviewViewModel(
     private val _uiState = MutableStateFlow(PrintPreviewUiState())
     val uiState: StateFlow<PrintPreviewUiState> = _uiState.asStateFlow()
 
+    private var userManuallyPickedTemplateId: Long? = null
+
     init {
         viewModelScope.launch {
             combine(
@@ -61,16 +64,28 @@ class PrintPreviewViewModel(
                 } else {
                     snap.allCards.filter { !it.isPrinted }.ifEmpty { snap.allCards.take(100) }
                 }
+                val batchPackageName = effectiveCards.firstOrNull()?.packageName
 
                 _uiState.update { current ->
-                    val chosenTemplate = when {
-                        current.activeTemplate.id != 0L && snap.templates.any { it.id == current.activeTemplate.id } ->
-                            snap.templates.first { it.id == current.activeTemplate.id }
-                        snap.queuedTemplate != null -> snap.queuedTemplate
-                        else -> snap.templates.firstOrNull { it.isDefault }
-                            ?: snap.templates.firstOrNull()
-                            ?: current.activeTemplate
+                    // Always resolve the freshest saved version from Room so edits (coordinates, image, font, color)
+                    // are immediately reflected in both preview and PDF export.
+                    val manualSelection = userManuallyPickedTemplateId?.let { id ->
+                        snap.templates.firstOrNull { it.id == id }
                     }
+                    val freshQueued = snap.queuedTemplate?.let { qt ->
+                        snap.templates.firstOrNull { it.id == qt.id } ?: qt
+                    }
+                    val matchedByPackage = CardLayoutMetrics.selectBestTemplateForPackage(
+                        templates = snap.templates,
+                        packageName = batchPackageName
+                    )
+                    val chosenTemplate = CardLayoutMetrics.sanitize(
+                        manualSelection
+                            ?: freshQueued
+                            ?: matchedByPackage
+                            ?: current.activeTemplate
+                    )
+
                     val perPage = (chosenTemplate.columnsPerPage.coerceIn(1, 6) * chosenTemplate.rowsPerPage.coerceIn(1, 30)).coerceAtLeast(1)
                     val pages = ceil(maxOf(1, effectiveCards.size).toDouble() / perPage).toInt()
                     current.copy(
@@ -87,11 +102,13 @@ class PrintPreviewViewModel(
     }
 
     fun selectTemplate(template: CardTemplateEntity) {
+        val safe = CardLayoutMetrics.sanitize(template)
+        userManuallyPickedTemplateId = safe.id
         _uiState.update { current ->
-            val perPage = (template.columnsPerPage.coerceIn(1, 6) * template.rowsPerPage.coerceIn(1, 30)).coerceAtLeast(1)
+            val perPage = (safe.columnsPerPage.coerceIn(1, 6) * safe.rowsPerPage.coerceIn(1, 30)).coerceAtLeast(1)
             val pages = ceil(maxOf(1, current.cardsToPrint.size).toDouble() / perPage).toInt()
             current.copy(
-                activeTemplate = template,
+                activeTemplate = safe,
                 totalPages = pages,
                 currentPageIndex = 0
             )
@@ -127,7 +144,7 @@ class PrintPreviewViewModel(
             val result = PdfPrintEngine.generateCardsGridPdf(
                 context = context,
                 cards = state.cardsToPrint,
-                template = state.activeTemplate,
+                template = CardLayoutMetrics.sanitize(state.activeTemplate),
                 title = "الكامل-طباعة الكروت",
                 showCutGuides = state.settings.showCutGuidesOnA4,
                 showPageHeader = state.settings.showHeaderOnA4
