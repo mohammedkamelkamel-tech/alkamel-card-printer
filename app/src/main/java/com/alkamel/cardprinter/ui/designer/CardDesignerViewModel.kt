@@ -23,6 +23,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -101,7 +104,7 @@ class CardDesignerViewModel(
         val defaultW = 203f
         val defaultH = 61f
         val cols = CardLayoutMetrics.calculateFittingColumns(defaultW)
-        val rows = CardLayoutMetrics.calculateFittingRows(defaultH)
+        val rows = CardLayoutMetrics.calculateFittingRowsForColumns(defaultW, defaultH, cols)
         val fresh = CardLayoutMetrics.sanitize(
             CardTemplateEntity(
                 id = 0L,
@@ -169,25 +172,31 @@ class CardDesignerViewModel(
                 current.copy(widthInput = filtered)
             } else {
                 val autoCols = CardLayoutMetrics.calculateFittingColumns(parsed)
-                val rows = current.activeTemplate.rowsPerPage.coerceIn(1, 30)
+                val autoRows = CardLayoutMetrics.calculateFittingRowsForColumns(
+                    cardWidth = parsed,
+                    cardHeight = current.activeTemplate.cardHeight,
+                    columns = autoCols
+                )
                 val updatedTpl = CardLayoutMetrics.sanitize(
                     current.activeTemplate.copy(
                         cardWidth = parsed,
-                        columnsPerPage = autoCols
+                        columnsPerPage = autoCols,
+                        rowsPerPage = autoRows
                     )
                 )
                 current.copy(
                     widthInput = filtered,
                     columnsInput = autoCols.toString(),
+                    rowsInput = autoRows.toString(),
                     activeTemplate = updatedTpl,
-                    cardsPerA4Page = autoCols * rows
+                    cardsPerA4Page = autoCols * autoRows
                 )
             }
         }
     }
 
     /**
-     * Automatically recalculates fitting rows & total cards per A4 page immediately
+     * Automatically recalculates fitting full-width rows & total cards per A4 page immediately
      * whenever the user changes card height.
      */
     fun onHeightChange(value: String) {
@@ -198,7 +207,11 @@ class CardDesignerViewModel(
                 current.copy(heightInput = filtered)
             } else {
                 val cols = current.activeTemplate.columnsPerPage.coerceIn(1, 6)
-                val autoRows = CardLayoutMetrics.calculateFittingRows(parsed)
+                val autoRows = CardLayoutMetrics.calculateFittingRowsForColumns(
+                    cardWidth = current.activeTemplate.cardWidth,
+                    cardHeight = parsed,
+                    columns = cols
+                )
                 val updatedTpl = CardLayoutMetrics.sanitize(
                     current.activeTemplate.copy(
                         cardHeight = parsed,
@@ -222,11 +235,22 @@ class CardDesignerViewModel(
             if (parsed == null) {
                 current.copy(columnsInput = filtered)
             } else {
-                val updatedTpl = CardLayoutMetrics.sanitize(current.activeTemplate.copy(columnsPerPage = parsed))
+                val autoRows = CardLayoutMetrics.calculateFittingRowsForColumns(
+                    cardWidth = current.activeTemplate.cardWidth,
+                    cardHeight = current.activeTemplate.cardHeight,
+                    columns = parsed
+                )
+                val updatedTpl = CardLayoutMetrics.sanitize(
+                    current.activeTemplate.copy(
+                        columnsPerPage = parsed,
+                        rowsPerPage = autoRows
+                    )
+                )
                 current.copy(
                     columnsInput = filtered,
+                    rowsInput = autoRows.toString(),
                     activeTemplate = updatedTpl,
-                    cardsPerA4Page = parsed * updatedTpl.rowsPerPage
+                    cardsPerA4Page = parsed * autoRows
                 )
             }
         }
@@ -262,12 +286,13 @@ class CardDesignerViewModel(
                         packageName = tpl.packageName
                     )
                 }
-                val pkgLabel = if (tpl.packageName == "الكل") "جميع الباقات" else tpl.packageName
+                val dateStr = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.US).format(Date())
+                val pkgSuffix = if (tpl.packageName == "الكل") "" else " • ${tpl.packageName}"
                 CardBitmapRenderer.renderA4PageBitmap(
                     cardsOnPage = sampleCards,
                     template = tpl,
-                    headerTitle = "${tpl.name} • $pkgLabel ($perPage كرت/صفحة)",
-                    headerMeta = "A4 • ${tpl.columnsPerPage}×${tpl.rowsPerPage}",
+                    headerTitle = "الكامل-طباعة الكروت • ${tpl.name}$pkgSuffix ($perPage كرت)",
+                    headerMeta = "A4 • صفحة 1/1  |  $dateStr",
                     showCutGuides = true,
                     showPageHeader = true
                 )
@@ -382,7 +407,7 @@ class CardDesignerViewModel(
                     current.cardHeight
                 }
                 val nextCols = CardLayoutMetrics.calculateFittingColumns(nextW)
-                val nextRows = CardLayoutMetrics.calculateFittingRows(nextH)
+                val nextRows = CardLayoutMetrics.calculateFittingRowsForColumns(nextW, nextH, nextCols)
 
                 val updatedTpl = CardLayoutMetrics.sanitize(
                     current.copy(

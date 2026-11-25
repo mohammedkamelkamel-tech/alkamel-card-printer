@@ -2,9 +2,11 @@ package com.alkamel.cardprinter.ui.dashboard
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.alkamel.cardprinter.data.local.model.CardStatus
+import com.alkamel.cardprinter.data.local.model.CardCountsSummary
+import com.alkamel.cardprinter.data.local.model.ComprehensiveSalesReport
 import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
+import com.alkamel.cardprinter.data.session.ActiveSession
 import com.alkamel.cardprinter.data.session.LocalSessionHolder
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -34,7 +36,11 @@ data class DashboardUiState(
     val isLiveRefreshing: Boolean = false,
     val totalCardsCount: Int = 0,
     val unusedCardsCount: Int = 0,
+    val usedCardsCount: Int = 0,
     val expiredCardsCount: Int = 0,
+    val packagesCount: Int = 0,
+    val totalSalesAmount: Double = 0.0,
+    val totalSalesCardsCount: Int = 0,
     val showFastSessionPrompt: Boolean = false,
     val isLoadingSessions: Boolean = false,
     val isSyncBarVisible: Boolean = false,
@@ -56,10 +62,13 @@ class DashboardViewModel(
         viewModelScope.launch {
             combine(
                 LocalSessionHolder.activeSession,
-                repository.observeAllCards()
-            ) { session, cards ->
-                session to cards
-            }.collect { (session, cards) ->
+                repository.observeCardCounts(),
+                repository.observePackageCount(),
+                repository.observeComprehensiveSalesReport()
+            ) { session, cardCounts, pkgCount, salesReport ->
+                DashboardBundle(session, cardCounts, pkgCount, salesReport)
+            }.collect { bundle ->
+                val session = bundle.session
                 val status = session?.systemStatus
                 val connected = session?.isConnectedToMikrotik == true && status != null
                 val hostLabel = if (session != null && session.hostAddress.isNotBlank()) {
@@ -85,9 +94,13 @@ class DashboardViewModel(
                         } else {
                             ""
                         },
-                        totalCardsCount = cards.size,
-                        unusedCardsCount = cards.count { it.status == CardStatus.UNUSED },
-                        expiredCardsCount = cards.count { it.status == CardStatus.EXPIRED },
+                        totalCardsCount = bundle.cardCounts.totalCount,
+                        unusedCardsCount = bundle.cardCounts.unusedCount,
+                        usedCardsCount = bundle.cardCounts.usedCount,
+                        expiredCardsCount = bundle.cardCounts.expiredCount,
+                        packagesCount = bundle.packagesCount,
+                        totalSalesAmount = bundle.salesReport.allTime.totalAmount,
+                        totalSalesCardsCount = bundle.salesReport.allTime.totalCards,
                         showFastSessionPrompt = current.showFastSessionPrompt ||
                             (connected && session?.shouldPromptFastSessionLoad == true)
                     )
@@ -119,11 +132,8 @@ class DashboardViewModel(
                             errorMessage = null
                         )
                     }.onFailure { err ->
-                        // Keep previous telemetry visible transiently unless disconnected repeatedly
                         _uiState.update {
-                            it.copy(
-                                connectionError = err.localizedMessage
-                            )
+                            it.copy(connectionError = err.localizedMessage)
                         }
                     }
                     _uiState.update { it.copy(isLiveRefreshing = false) }
@@ -179,7 +189,7 @@ class DashboardViewModel(
                     isLoadingSessions = true,
                     isSyncBarVisible = true,
                     sessionLoadProgress = 5,
-                    sessionLoadLabel = "جاري الاتصال بالمايكروتيك...",
+                    sessionLoadLabel = "جاري الاتصال بسيرفر يوزر منجر...",
                     connectionError = null
                 )
             }
@@ -205,13 +215,14 @@ class DashboardViewModel(
                     systemStatus = summary.systemStatus,
                     errorMessage = null
                 )
+                LocalSessionHolder.updateLiveReportsMetrics(summary.liveReportsMetrics)
+                val doneMsg = "تم تحديث يوزر منجر بالكامل (${summary.cardsSynced} كرت • ${summary.packagesSynced} باقة)"
                 _uiState.update {
                     it.copy(
                         sessionLoadProgress = 100,
-                        sessionLoadLabel = "تم تحديث الكروت والجلسات بالكامل"
+                        sessionLoadLabel = doneMsg
                     )
                 }
-                // Brief pause so user sees 100%, then auto-hide the bottom progress bar completely
                 delay(350L)
                 _uiState.update {
                     it.copy(
@@ -219,7 +230,7 @@ class DashboardViewModel(
                         isSyncBarVisible = false,
                         sessionLoadProgress = 0,
                         sessionLoadLabel = "",
-                        syncCompletionMessage = "تم تحديث الكروت والجلسات بالكامل"
+                        syncCompletionMessage = doneMsg
                     )
                 }
             }.onFailure { err ->
@@ -251,4 +262,11 @@ class DashboardViewModel(
     private fun formatTimeShort(millis: Long): String {
         return SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(millis))
     }
+
+    private data class DashboardBundle(
+        val session: ActiveSession?,
+        val cardCounts: CardCountsSummary,
+        val packagesCount: Int,
+        val salesReport: ComprehensiveSalesReport
+    )
 }

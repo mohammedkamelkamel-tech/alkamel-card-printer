@@ -51,9 +51,10 @@ object CardLayoutMetrics {
     const val A4_PREVIEW_WIDTH = 952
     const val A4_PREVIEW_HEIGHT = 1347 // Exact 595:842 (210:297) ratio
 
-    const val A4_MARGIN_RATIO = 16f / 595f
-    const val A4_HEADER_RATIO = 24f / 842f
-    const val A4_GAP_RATIO = 2.5f / 595f
+    // Tight printable ISO A4 margins so columns extend cleanly across the full page width
+    const val A4_MARGIN_RATIO = 8f / 595f
+    const val A4_HEADER_RATIO = 22f / 842f
+    const val A4_GAP_RATIO = 2f / 595f
 
     const val DEFAULT_USERNAME_X = 0.50f
     const val DEFAULT_USERNAME_Y = 0.52f
@@ -72,9 +73,9 @@ object CardLayoutMetrics {
     const val MIN_QR_REL_Y = 0.14f
     const val MAX_QR_REL_Y = 0.86f
 
-    // True ISO A4 printable reference space (ratio 832 : 1162 matches official A4 printable area)
+    // True ISO A4 printable reference width for calculating fitting columns from cardWidth
     private const val A4_PRINTABLE_REF_W = 832f
-    private const val A4_PRINTABLE_REF_H = 1162f
+    private const val A4_PRINTABLE_REF_H = 1170f
     private const val A4_CARD_GAP = 4f
 
     fun sanitizeRel(value: Float, fallback: Float, min: Float, max: Float): Float {
@@ -131,9 +132,9 @@ object CardLayoutMetrics {
     }
 
     /**
-     * Computes exact, undistorted aspect-ratio-locked card placement on an ISO A4 page.
-     * Guarantees every card cell has cardWidthPx / cardHeightPx == cardWidth / cardHeight
-     * with zero horizontal stretching or vertical squishing.
+     * Computes full-width ISO A4 grid placement so cards ALWAYS extend across the full
+     * printable width of the A4 sheet (zero unintended left/right side gaps) while keeping
+     * the top header line intact and preserving natural card proportions.
      */
     fun computeA4SheetLayout(
         template: CardTemplateEntity,
@@ -151,24 +152,12 @@ object CardLayoutMetrics {
         val availW = (pageWidth - margin * 2f).coerceAtLeast(100f)
         val availH = (pageHeight - margin * 2f - headerH).coerceAtLeast(100f)
 
-        val slotW = ((availW - gap * (cols - 1)) / cols).coerceAtLeast(16f)
-        val slotH = ((availH - gap * (rows - 1)) / rows).coerceAtLeast(10f)
+        // Always fill the full printable width across the chosen columns (zero empty side margins)
+        val fitW = ((availW - gap * (cols - 1)) / cols).coerceAtLeast(16f)
+        val maxSlotH = ((availH - gap * (rows - 1)) / rows).coerceAtLeast(10f)
         val cardRatio = computeCardAspectRatio(safe)
-
-        val fitW: Float
-        val fitH: Float
-        if (slotW / slotH > cardRatio) {
-            fitH = slotH
-            fitW = slotH * cardRatio
-        } else {
-            fitW = slotW
-            fitH = slotW / cardRatio
-        }
-
-        val totalGridW = cols * fitW + (cols - 1) * gap
-        val totalGridH = rows * fitH + (rows - 1) * gap
-        val startX = margin + ((availW - totalGridW) / 2f).coerceAtLeast(0f)
-        val startY = margin + headerH + ((availH - totalGridH) / 2f).coerceAtLeast(0f)
+        val naturalH = fitW / cardRatio
+        val fitH = minOf(naturalH, maxSlotH)
 
         return A4SheetLayout(
             pageWidth = pageWidth,
@@ -180,8 +169,8 @@ object CardLayoutMetrics {
             rows = rows,
             cardWidthPx = fitW,
             cardHeightPx = fitH,
-            gridStartX = startX,
-            gridStartY = startY
+            gridStartX = margin,
+            gridStartY = margin + headerH
         )
     }
 
@@ -216,6 +205,37 @@ object CardLayoutMetrics {
     fun calculateFittingRows(cardHeight: Float): Int {
         val safeH = if (cardHeight.isFinite()) cardHeight.coerceIn(30f, 300f) else 61f
         return floor((A4_PRINTABLE_REF_H + A4_CARD_GAP) / (safeH + A4_CARD_GAP))
+            .toInt()
+            .coerceIn(1, 30)
+    }
+
+    /**
+     * Computes exact number of undistorted full-width rows that fit vertically on an ISO A4 page
+     * given [cardWidth], [cardHeight], and full-width [columns].
+     */
+    fun calculateFittingRowsForColumns(
+        cardWidth: Float,
+        cardHeight: Float,
+        columns: Int,
+        showPageHeader: Boolean = true
+    ): Int {
+        val safeCols = columns.coerceIn(1, 6)
+        val safeW = if (cardWidth.isFinite()) cardWidth.coerceIn(60f, 500f) else 203f
+        val safeH = if (cardHeight.isFinite()) cardHeight.coerceIn(30f, 300f) else 61f
+        val cardRatio = (safeW / safeH).coerceIn(0.8f, 4.8f)
+
+        val pageW = A4_PDF_WIDTH.toFloat()
+        val pageH = A4_PDF_HEIGHT.toFloat()
+        val margin = pageW * A4_MARGIN_RATIO
+        val headerH = if (showPageHeader) pageH * A4_HEADER_RATIO else 0f
+        val gap = pageW * A4_GAP_RATIO
+
+        val availW = (pageW - margin * 2f).coerceAtLeast(100f)
+        val availH = (pageH - margin * 2f - headerH).coerceAtLeast(100f)
+
+        val fitW = (availW - gap * (safeCols - 1)) / safeCols
+        val naturalH = (fitW / cardRatio).coerceAtLeast(10f)
+        return floor((availH + gap) / (naturalH + gap))
             .toInt()
             .coerceIn(1, 30)
     }

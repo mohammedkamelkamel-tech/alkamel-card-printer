@@ -2,6 +2,7 @@ package com.alkamel.cardprinter.data.session
 
 import com.alkamel.cardprinter.data.local.model.NetworkLoadType
 import com.alkamel.cardprinter.data.mikrotik.MikrotikCredentials
+import com.alkamel.cardprinter.data.mikrotik.MikrotikLiveReportsMetrics
 import com.alkamel.cardprinter.data.mikrotik.MikrotikSystemStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +32,9 @@ object LocalSessionHolder {
     private val _activeSession = MutableStateFlow<ActiveSession?>(null)
     val activeSession: StateFlow<ActiveSession?> = _activeSession.asStateFlow()
 
+    private val _liveReportsMetrics = MutableStateFlow<MikrotikLiveReportsMetrics?>(null)
+    val liveReportsMetrics: StateFlow<MikrotikLiveReportsMetrics?> = _liveReportsMetrics.asStateFlow()
+
     fun setSession(session: ActiveSession) {
         _activeSession.value = session
     }
@@ -47,11 +51,16 @@ object LocalSessionHolder {
         )
     }
 
+    fun updateLiveReportsMetrics(metrics: MikrotikLiveReportsMetrics?) {
+        _liveReportsMetrics.value = metrics
+    }
+
     fun markFastSessionPromptHandled() {
         _activeSession.value = _activeSession.value?.copy(shouldPromptFastSessionLoad = false)
     }
 
     fun clearSession() {
         _activeSession.value = null
+        _liveReportsMetrics.value = null
     }
 }

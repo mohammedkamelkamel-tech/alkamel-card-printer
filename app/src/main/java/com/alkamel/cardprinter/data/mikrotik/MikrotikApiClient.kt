@@ -9,6 +9,7 @@ import java.io.EOFException
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
 
 data class RouterOsSentence(
@@ -24,14 +25,23 @@ data class RouterOsCommandResult(
     val isSuccess: Boolean get() = trapMessage == null
 }
 
+data class RouterOsStreamResult(
+    val recordCount: Int,
+    val doneAttributes: Map<String, String>,
+    val trapMessage: String? = null
+) {
+    val isSuccess: Boolean get() = trapMessage == null
+}
+
 /**
  * Native pure-Kotlin MikroTik RouterOS Binary API Client (supports RouterOS v6 & v7,
  * including both modern plaintext /login and legacy MD5 challenge-response /login).
- * All I/O executes strictly on Dispatchers.IO with timeouts and safe resource cleanup.
+ * Supports both buffered and low-memory streaming execution for large User Manager tables
+ * (50,000+ cards/sessions) with dynamic timeouts and safe resource cleanup.
  */
 class MikrotikApiClient(
-    private val connectTimeoutMs: Int = 6000,
-    private val readTimeoutMs: Int = 10000
+    private val connectTimeoutMs: Int = 8000,
+    private val readTimeoutMs: Int = 20000
 ) : AutoCloseable {
 
     private var socket: Socket? = null
@@ -40,6 +50,11 @@ class MikrotikApiClient(
 
     val isOpen: Boolean
         get() = socket?.let { it.isConnected && !it.isClosed } == true
+
+    fun setReadTimeout(timeoutMs: Int) {
+        val safeTimeout = timeoutMs.coerceIn(3000, 300000)
+        runCatching { socket?.soTimeout = safeTimeout }
+    }
 
     suspend fun connectAndLogin(credentials: MikrotikCredentials): Result<Unit> = withContext(Dispatchers.IO) {
         try {
@@ -50,12 +65,17 @@ class MikrotikApiClient(
             }
             val cleanPort = credentials.port.coerceIn(1, 65535)
             val newSocket = Socket()
+            runCatching {
+                newSocket.tcpNoDelay = true
+                newSocket.keepAlive = true
+                newSocket.receiveBufferSize = 256 * 1024
+            }
             newSocket.connect(InetSocketAddress(cleanHost, cleanPort), connectTimeoutMs)
             newSocket.soTimeout = readTimeoutMs
 
             socket = newSocket
-            input = BufferedInputStream(newSocket.getInputStream())
-            output = BufferedOutputStream(newSocket.getOutputStream())
+            input = BufferedInputStream(newSocket.getInputStream(), 64 * 1024)
+            output = BufferedOutputStream(newSocket.getOutputStream(), 16 * 1024)
 
             // Attempt modern RouterOS v6.43+ / v7 login first
             val firstRes = executeInternal(
@@ -94,33 +114,95 @@ class MikrotikApiClient(
             Result.success(Unit)
         } catch (e: Exception) {
             close()
-            val readable = when {
-                e is java.net.SocketTimeoutException -> "انتهت مهلة الاتصال بالمايكروتيك (${credentials.host}:${credentials.port}). تأكد من أن الهاتف على نفس الشبكة وأن خدمة API مفعلة."
-                e is java.net.ConnectException -> "تعذر الوصول إلى المايكروتيك (${credentials.host}:${credentials.port}). تأكد من العنوان والمنفذ وتفعيل IP -> Services -> api."
-                e is java.net.UnknownHostException -> "عنوان السيرفر غير معروف (${credentials.host})."
+            val readable = when (e) {
+                is SocketTimeoutException -> "انتهت مهلة الاتصال بالمايكروتيك (${credentials.host}:${credentials.port}). تأكد من أن الهاتف على نفس الشبكة وأن خدمة API مفعلة."
+                is java.net.ConnectException -> "تعذر الوصول إلى المايكروتيك (${credentials.host}:${credentials.port}). تأكد من العنوان والمنفذ وتفعيل IP -> Services -> api."
+                is java.net.UnknownHostException -> "عنوان السيرفر غير معروف (${credentials.host})."
                 else -> e.localizedMessage ?: "تعذر الاتصال بسيرفر المايكروتيك."
             }
             Result.failure(IOException(readable, e))
         }
     }
 
-    suspend fun execute(command: String, params: List<String> = emptyList()): Result<RouterOsCommandResult> =
-        withContext(Dispatchers.IO) {
-            try {
-                if (!isOpen) {
-                    return@withContext Result.failure(IOException("الاتصال بالمايكروتيك مغلق."))
-                }
-                val words = ArrayList<String>(1 + params.size).apply {
-                    add(command)
-                    addAll(params)
-                }
-                Result.success(executeInternal(words))
-            } catch (e: Exception) {
-                Result.failure(e)
+    suspend fun execute(
+        command: String,
+        params: List<String> = emptyList(),
+        timeoutMs: Int? = null
+    ): Result<RouterOsCommandResult> = withContext(Dispatchers.IO) {
+        val previousTimeout = runCatching { socket?.soTimeout }.getOrNull()
+        try {
+            if (!isOpen) {
+                return@withContext Result.failure(IOException("الاتصال بالمايكروتيك مغلق."))
+            }
+            if (timeoutMs != null) {
+                setReadTimeout(timeoutMs)
+            }
+            val words = ArrayList<String>(1 + params.size).apply {
+                add(command)
+                addAll(params)
+            }
+            Result.success(executeInternal(words))
+        } catch (e: SocketTimeoutException) {
+            close()
+            Result.failure(IOException("انتهت مهلة قراءة البيانات من المايكروتيك أثناء تنفيذ ($command). قد تكون البيانات كبيرة جداً أو الشبكة بطيئة.", e))
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            if (timeoutMs != null && previousTimeout != null && isOpen) {
+                runCatching { socket?.soTimeout = previousTimeout }
             }
         }
+    }
+
+    /**
+     * Streams every `!re` record directly to [onRecord] until `!done` is received,
+     * ensuring 100% of records are consumed without holding tens of thousands of raw maps in RAM.
+     */
+    suspend fun executeStreaming(
+        command: String,
+        params: List<String> = emptyList(),
+        timeoutMs: Int = 120_000,
+        onRecord: (index: Int, record: Map<String, String>) -> Unit
+    ): Result<RouterOsStreamResult> = withContext(Dispatchers.IO) {
+        val previousTimeout = runCatching { socket?.soTimeout }.getOrNull()
+        try {
+            if (!isOpen) {
+                return@withContext Result.failure(IOException("الاتصال بالمايكروتيك مغلق."))
+            }
+            setReadTimeout(timeoutMs)
+            val words = ArrayList<String>(1 + params.size).apply {
+                add(command)
+                addAll(params)
+            }
+            Result.success(executeStreamingInternal(words, onRecord))
+        } catch (e: SocketTimeoutException) {
+            close()
+            Result.failure(IOException("انتهت مهلة جلب القائمة الكاملة من المايكروتيك ($command). أعد المحاولة عند استقرار الاتصال.", e))
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            if (previousTimeout != null && isOpen) {
+                runCatching { socket?.soTimeout = previousTimeout }
+            }
+        }
+    }
 
     private fun executeInternal(words: List<String>): RouterOsCommandResult {
+        val records = mutableListOf<Map<String, String>>()
+        val streamRes = executeStreamingInternal(words) { _, rec ->
+            records.add(rec)
+        }
+        return RouterOsCommandResult(
+            records = records,
+            doneAttributes = streamRes.doneAttributes,
+            trapMessage = streamRes.trapMessage
+        )
+    }
+
+    private fun executeStreamingInternal(
+        words: List<String>,
+        onRecord: (index: Int, record: Map<String, String>) -> Unit
+    ): RouterOsStreamResult {
         val out = output ?: throw IOException("قناة الإرسال غير متصلة")
         for (word in words) {
             writeWord(out, word)
@@ -129,21 +211,24 @@ class MikrotikApiClient(
         out.write(0)
         out.flush()
 
-        val records = mutableListOf<Map<String, String>>()
+        var recordCount = 0
         val doneAttrs = mutableMapOf<String, String>()
         var trapMessage: String? = null
 
         while (true) {
-            val sentence = readSentence() ?: throw EOFException("انقطع الاتصال بالمايكروتيك بشكل غير متوقع")
+            val sentence = readSentence() ?: throw EOFException("انقطع الاتصال بالمايكروتيك قبل اكتمال جلب البيانات")
             when (sentence.type) {
-                "!re" -> records.add(sentence.attributes)
+                "!re" -> {
+                    onRecord(recordCount, sentence.attributes)
+                    recordCount++
+                }
                 "!trap" -> {
                     trapMessage = sentence.attributes["message"] ?: "خطأ من المايكروتيك (!trap)"
                 }
                 "!fatal" -> {
                     val fatalMsg = sentence.attributes["message"] ?: "أغلق المايكروتيك الاتصال (!fatal)"
                     close()
-                    return RouterOsCommandResult(records, doneAttrs, fatalMsg)
+                    return RouterOsStreamResult(recordCount, doneAttrs, fatalMsg)
                 }
                 "!done" -> {
                     doneAttrs.putAll(sentence.attributes)
@@ -151,7 +236,11 @@ class MikrotikApiClient(
                 }
             }
         }
-        return RouterOsCommandResult(records = records, doneAttributes = doneAttrs, trapMessage = trapMessage)
+        return RouterOsStreamResult(
+            recordCount = recordCount,
+            doneAttributes = doneAttrs,
+            trapMessage = trapMessage
+        )
     }
 
     private fun readSentence(): RouterOsSentence? {
@@ -169,7 +258,7 @@ class MikrotikApiClient(
 
     private fun parseSentence(words: List<String>): RouterOsSentence {
         val type = words.firstOrNull().orEmpty()
-        val attrs = LinkedHashMap<String, String>()
+        val attrs = LinkedHashMap<String, String>(words.size)
         for (i in 1 until words.size) {
             val w = words[i]
             if (w.startsWith("=")) {

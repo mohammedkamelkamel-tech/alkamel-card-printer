@@ -85,7 +85,7 @@ jobs:
           name: alkamel-card-printer-debug-apk
           path: alkamel-card-printer-debug.apk
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 1
 
       - name: Build Release Unsigned APK (Optional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
@@ -109,4 +109,4 @@ jobs:
           name: alkamel-card-printer-release-apk
           path: alkamel-card-printer-release-unsigned.apk
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 1

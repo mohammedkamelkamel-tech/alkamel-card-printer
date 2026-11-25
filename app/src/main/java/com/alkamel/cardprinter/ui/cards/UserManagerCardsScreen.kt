@@ -119,13 +119,7 @@ fun UserManagerCardsScreen(
         }
     }
 
-    val categories = remember(state.packages, state.allCards) {
-        val dynamic = (state.packages.map { it.name } + state.allCards.map { it.packageName })
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .distinct()
-        listOf(CATEGORY_ALL, CATEGORY_UNPRINTED) + dynamic
-    }
+    val categories = state.availableCategories
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -259,8 +253,15 @@ fun UserManagerCardsScreen(
             ) {
                 Column {
                     Text(
-                        text = "عدد الكروت: ${state.filteredCards.size}" +
-                            if (state.selectedCardIds.isNotEmpty()) "  •  محدد: ${state.selectedCardIds.size}" else "",
+                        text = buildString {
+                            append("إجمالي الكروت: ${state.totalCardsCount}")
+                            if (state.hasActiveFilter) {
+                                append("  •  المعروض: ${state.filteredCards.size}")
+                            }
+                            if (state.selectedCardIds.isNotEmpty()) {
+                                append("  •  محدد: ${state.selectedCardIds.size}")
+                            }
+                        },
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground

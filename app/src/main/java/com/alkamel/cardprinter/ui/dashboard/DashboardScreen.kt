@@ -114,7 +114,14 @@ fun DashboardScreen(
         }
     }
 
-    val tiles = remember(state.totalCardsCount, state.expiredCardsCount, ext) {
+    val tiles = remember(
+        state.totalCardsCount,
+        state.expiredCardsCount,
+        state.packagesCount,
+        state.totalSalesAmount,
+        state.totalSalesCardsCount,
+        ext
+    ) {
         listOf(
             DashboardTile(
                 title = "طباعة كروت",
@@ -132,14 +139,18 @@ fun DashboardScreen(
             ),
             DashboardTile(
                 title = "الباقات",
-                subtitle = "باقات يوزر منجر والأسعار",
+                subtitle = if (state.packagesCount > 0) "${state.packagesCount} باقة يوزر منجر" else "باقات يوزر منجر والأسعار",
                 icon = Icons.Rounded.Folder,
                 accentColor = ext.reportAmberGold,
                 route = AppRoutes.PACKAGES
             ),
             DashboardTile(
                 title = "المبيعات",
-                subtitle = "مبيعات كروت يوزر منجر",
+                subtitle = if (state.totalSalesCardsCount > 0) {
+                    "${state.totalSalesAmount.toLong()} ريال • ${state.totalSalesCardsCount} كرت"
+                } else {
+                    "مبيعات كروت يوزر منجر"
+                },
                 icon = Icons.Rounded.MonetizationOn,
                 accentColor = ext.reportTeal,
                 route = AppRoutes.SALES

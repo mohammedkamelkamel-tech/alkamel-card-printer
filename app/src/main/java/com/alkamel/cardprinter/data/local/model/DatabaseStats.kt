@@ -1,5 +1,30 @@
 package com.alkamel.cardprinter.data.local.model
 
+data class CardCountsSummary(
+    val totalCount: Int = 0,
+    val unusedCount: Int = 0,
+    val usedCount: Int = 0,
+    val expiredCount: Int = 0,
+    val totalDataUsageMb: Double = 0.0
+)
+
+data class PackageCardCount(
+    val packageName: String,
+    val cardsCount: Int
+)
+
+data class CardSyncMeta(
+    val id: Long,
+    val username: String,
+    val price: Double,
+    val isPrinted: Boolean,
+    val printedAt: Long?,
+    val printedDateKey: String?,
+    val createdAt: Long,
+    val mikrotikId: String?,
+    val sourceFileName: String?
+)
+
 data class PeriodSalesSummary(
     val totalAmount: Double = 0.0,
     val totalCards: Int = 0,

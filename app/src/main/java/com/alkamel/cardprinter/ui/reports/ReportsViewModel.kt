@@ -3,13 +3,11 @@ package com.alkamel.cardprinter.ui.reports
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
 import com.alkamel.cardprinter.data.local.entity.PrintSalesLogEntity
-import com.alkamel.cardprinter.data.local.model.CardStatus
+import com.alkamel.cardprinter.data.local.model.CardCountsSummary
 import com.alkamel.cardprinter.data.local.model.ComprehensiveSalesReport
 import com.alkamel.cardprinter.data.local.model.PeriodSalesSummary
-import com.alkamel.cardprinter.data.local.model.TopSellingPackageStat
 import com.alkamel.cardprinter.data.local.util.DateTimeUtils
 import com.alkamel.cardprinter.data.mikrotik.MikrotikLiveReportsMetrics
 import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
@@ -55,51 +53,48 @@ class ReportsViewModel(
     private val _uiState = MutableStateFlow(ReportsUiState())
     val uiState: StateFlow<ReportsUiState> = _uiState.asStateFlow()
 
-    private val liveMetricsFlow = MutableStateFlow<MikrotikLiveReportsMetrics?>(null)
-    private var latestCards: List<CardEntity> = emptyList()
     private var latestPackages: List<CardPackageEntity> = emptyList()
 
     init {
         viewModelScope.launch {
             val localDataFlow = combine(
                 repository.observeComprehensiveSalesReport(),
-                repository.observeAllCards(),
+                repository.observeCardCounts(),
                 repository.observeAllSalesLogs()
-            ) { report, cards, logs ->
-                Triple(report, cards, logs)
+            ) { report, cardCounts, logs ->
+                Triple(report, cardCounts, logs)
             }
             val metaDataFlow = combine(
                 repository.observeAllPackages(),
                 LocalSessionHolder.activeSession,
-                liveMetricsFlow
+                LocalSessionHolder.liveReportsMetrics
             ) { packages, session, liveMetrics ->
                 Triple(packages, session, liveMetrics)
             }
             combine(localDataFlow, metaDataFlow) { localTriple, metaTriple ->
                 ReportsBundle(
                     localReport = localTriple.first,
-                    cards = localTriple.second,
+                    cardCounts = localTriple.second,
                     logs = localTriple.third,
                     packages = metaTriple.first,
                     session = metaTriple.second,
                     liveMetrics = metaTriple.third
                 )
             }.collect { bundle ->
-                latestCards = bundle.cards
                 latestPackages = bundle.packages
 
-                val cards = bundle.cards
+                val counts = bundle.cardCounts
                 val logs = bundle.logs
                 val localReport = bundle.localReport
                 val live = bundle.liveMetrics
                 val connected = bundle.session?.isConnectedToMikrotik == true
 
-                val total = cards.size.coerceAtLeast(1)
-                val expired = cards.count { it.status == CardStatus.EXPIRED }
-                val used = cards.count { it.status == CardStatus.USED }
-                val unused = cards.count { it.status == CardStatus.UNUSED }
+                val totalCards = counts.totalCount
+                val totalSafe = totalCards.coerceAtLeast(1)
+                val expired = counts.expiredCount
+                val used = counts.usedCount
+                val unused = counts.unusedCount
 
-                // Today download: combine local printed logs + live MikroTik sessions / active download
                 val todayKey = DateTimeUtils.todayDateKey()
                 val localTodayMb = logs.filter { it.dateKey == todayKey }.sumOf { it.downloadMb }
                 val liveTodayBytes = live?.todayDownloadBytes
@@ -108,9 +103,9 @@ class ReportsViewModel(
                 val liveTodayMb = liveTodayBytes / (1024.0 * 1024.0)
                 val effectiveTodayMb = maxOf(localTodayMb, liveTodayMb)
 
-                val cardsTotalMb = cards.sumOf { it.dataUsageMb }
+                val cardsTotalMb = counts.totalDataUsageMb
                 val logsTotalMb = logs.sumOf { it.downloadMb }
-                val effectiveTotalMb = maxOf(cardsTotalMb + logsTotalMb, effectiveTodayMb)
+                val effectiveTotalMb = maxOf(cardsTotalMb, logsTotalMb, effectiveTodayMb)
 
                 val todayPercent = when {
                     effectiveTotalMb > 0.0 && effectiveTodayMb > 0.0 -> {
@@ -120,7 +115,6 @@ class ReportsViewModel(
                     else -> 0
                 }
 
-                // Merge period sales: prefer higher real activity between local print logs and live MikroTik sessions/payments
                 fun mergePeriod(local: PeriodSalesSummary, remote: PeriodSalesSummary?): PeriodSalesSummary {
                     if (remote == null) return local
                     return when {
@@ -135,28 +129,11 @@ class ReportsViewModel(
                 val mergedYesterday = mergePeriod(localReport.yesterday, live?.yesterdaySales)
                 val mergedWeekly = mergePeriod(localReport.weekly, live?.weeklySales)
                 val mergedMonthly = mergePeriod(localReport.monthly, live?.monthlySales)
+                val mergedAllTime = mergePeriod(localReport.allTime, live?.allTimeSales)
 
-                // Top selling / most consumed package:
-                // Use local sales log top package if available; otherwise compute from real USED + EXPIRED MikroTik cards
-                val priceByPkg = bundle.packages.associate { it.name.lowercase() to it.price }
-                val derivedTopPkg = localReport.topSellingPackage ?: cards
-                    .filter { it.status != CardStatus.UNUSED && it.packageName.isNotBlank() }
-                    .groupBy { it.packageName }
-                    .map { (pkgName, pkgCards) ->
-                        val unitPrice = priceByPkg[pkgName.lowercase()]
-                            ?.takeIf { it > 0.0 }
-                            ?: pkgCards.firstOrNull { it.price > 0.0 }?.price
-                            ?: MikrotikSyncManager.inferPriceFromPackageName(pkgName)
-                        TopSellingPackageStat(
-                            packageName = pkgName,
-                            totalCards = pkgCards.size,
-                            totalAmount = pkgCards.size * unitPrice
-                        )
-                    }
-                    .maxByOrNull { it.totalCards }
-
+                val derivedTopPkg = localReport.topSellingPackage
                 val topPkgSubtitle = if (derivedTopPkg != null) {
-                    "${derivedTopPkg.totalCards} كرت مستهلك • متبقي: $unused"
+                    "${derivedTopPkg.totalCards} كرت • متبقي: $unused"
                 } else {
                     "متبقي غير مستخدم: $unused"
                 }
@@ -166,14 +143,14 @@ class ReportsViewModel(
                     yesterday = mergedYesterday,
                     weekly = mergedWeekly,
                     monthly = mergedMonthly,
-                    allTime = if (localReport.allTime.totalCards > 0) localReport.allTime else mergedMonthly,
+                    allTime = if (mergedAllTime.totalCards > 0) mergedAllTime else mergedMonthly,
                     topSellingPackage = derivedTopPkg
                 )
 
                 val sourceNote = when {
                     live != null && live.sourceNote.isNotBlank() -> live.sourceNote
-                    connected -> "بيانات حية من المايكروتيك (${cards.size} كرت متزامن)"
-                    cards.isNotEmpty() -> "بيانات من قاعدة البيانات المحلية (${cards.size} كرت محفوظ)"
+                    connected -> "بيانات حية من يوزر منجر ($totalCards كرت متزامن)"
+                    totalCards > 0 -> "بيانات من قاعدة البيانات المحلية ($totalCards كرت محفوظ)"
                     else -> "لا توجد بيانات بعد — اتصل بالمايكروتيك وقم بالمزامنة"
                 }
 
@@ -181,12 +158,12 @@ class ReportsViewModel(
                     it.copy(
                         report = mergedReport,
                         allLogs = logs,
-                        totalCards = cards.size,
+                        totalCards = totalCards,
                         expiredCardsCount = expired,
                         usedCardsCount = used,
                         unusedCardsCount = unused,
-                        expiredPercent = if (cards.isEmpty()) 0 else ((expired * 100) / total).coerceIn(0, 100),
-                        usedPercent = if (cards.isEmpty()) 0 else ((used * 100) / total).coerceIn(0, 100),
+                        expiredPercent = if (totalCards == 0) 0 else ((expired * 100) / totalSafe).coerceIn(0, 100),
+                        usedPercent = if (totalCards == 0) 0 else ((used * 100) / totalSafe).coerceIn(0, 100),
                         todayDownloadPercent = todayPercent,
                         todayDownloadGb = effectiveTodayMb / 1024.0,
                         totalDownloadGb = effectiveTotalMb / 1024.0,
@@ -208,18 +185,20 @@ class ReportsViewModel(
 
         viewModelScope.launch {
             _uiState.update { it.copy(isRefreshingMikrotik = true, errorMessage = null) }
+            val allCards = repository.getAllCardsOnce()
             val result = MikrotikSyncManager.fetchLiveReportsMetrics(
                 credentials = session.toCredentials(),
                 loadType = session.loadType,
-                cards = latestCards,
-                packages = latestPackages
+                cards = allCards,
+                packages = latestPackages,
+                repository = repository
             )
             result.onSuccess { metrics ->
-                liveMetricsFlow.value = metrics
+                LocalSessionHolder.updateLiveReportsMetrics(metrics)
                 _uiState.update {
                     it.copy(
                         isRefreshingMikrotik = false,
-                        statusMessage = "تم تحديث التقارير الحية من المايكروتيك."
+                        statusMessage = "تم تحديث التقارير والمبيعات الحية من يوزر منجر."
                     )
                 }
             }.onFailure { err ->
@@ -270,7 +249,7 @@ class ReportsViewModel(
 
     private data class ReportsBundle(
         val localReport: ComprehensiveSalesReport,
-        val cards: List<CardEntity>,
+        val cardCounts: CardCountsSummary,
         val logs: List<PrintSalesLogEntity>,
         val packages: List<CardPackageEntity>,
         val session: ActiveSession?,

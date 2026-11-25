@@ -12,20 +12,24 @@ import com.alkamel.cardprinter.data.repository.CardPrinterRepository
 import com.alkamel.cardprinter.data.session.LocalSessionHolder
 import com.alkamel.cardprinter.data.session.PrintQueueHolder
 import com.alkamel.cardprinter.data.util.CardImportParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 const val CATEGORY_ALL = "الكل"
 const val CATEGORY_UNPRINTED = "كل الكروت غير المطبوعة"
 
 data class UserManagerCardsUiState(
+    val totalCardsCount: Int = 0,
     val allCards: List<CardEntity> = emptyList(),
     val filteredCards: List<CardEntity> = emptyList(),
     val packages: List<CardPackageEntity> = emptyList(),
+    val availableCategories: List<String> = listOf(CATEGORY_ALL, CATEGORY_UNPRINTED),
     val templates: List<CardTemplateEntity> = emptyList(),
     val selectedCardIds: Set<Long> = emptySet(),
     val printDateQuery: String = "",
@@ -43,7 +47,13 @@ data class UserManagerCardsUiState(
     val cardSessionsSourceNote: String = "",
     val statusMessage: String? = null,
     val errorMessage: String? = null
-)
+) {
+    val hasActiveFilter: Boolean
+        get() = selectedStatus != null ||
+            selectedCategory != CATEGORY_ALL ||
+            appliedPrintDate.isNotBlank() ||
+            usernameQuery.isNotBlank()
+}
 
 class UserManagerCardsViewModel(
     private val repository: CardPrinterRepository
@@ -55,27 +65,70 @@ class UserManagerCardsViewModel(
     init {
         viewModelScope.launch {
             combine(
+                repository.observeCardCounts(),
+                repository.observePackageCardCounts(),
+                repository.observeAllPackages()
+            ) { counts, pkgCounts, pkgs ->
+                Triple(counts, pkgCounts, pkgs)
+            }.collect { (counts, pkgCounts, pkgs) ->
+                val dynamicCategories = (pkgs.map { it.name } + pkgCounts.map { it.packageName })
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                val categories = listOf(CATEGORY_ALL, CATEGORY_UNPRINTED) + dynamicCategories
+                _uiState.update { latest ->
+                    latest.copy(
+                        totalCardsCount = counts.totalCount,
+                        packages = pkgs,
+                        availableCategories = categories
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
                 LocalSessionHolder.activeSession,
                 repository.observeAllCards(),
-                repository.observeAllPackages(),
                 repository.observeAllTemplates()
-            ) { session, cards, pkgs, templates ->
-                CardsBundle(session?.isConnectedToMikrotik == true, cards, pkgs, templates)
+            ) { session, cards, templates ->
+                CardsBundle(session?.isConnectedToMikrotik == true, cards, templates)
             }.collect { bundle ->
-                _uiState.update { current ->
-                    val validIds = bundle.cards.map { it.id }.toSet()
-                    val refreshedInspected = current.inspectedCard?.let { cur ->
+                val current = _uiState.value
+                val (validIds, filtered, refreshedInspected) = withContext(Dispatchers.Default) {
+                    val ids = if (current.selectedCardIds.isEmpty()) {
+                        emptySet()
+                    } else {
+                        val allIds = HashSet<Long>(bundle.cards.size)
+                        bundle.cards.forEach { allIds.add(it.id) }
+                        current.selectedCardIds.filterTo(HashSet()) { it in allIds }
+                    }
+                    val inspected = current.inspectedCard?.let { cur ->
                         bundle.cards.firstOrNull { it.id == cur.id } ?: cur
                     }
-                    val updated = current.copy(
+                    val previewState = current.copy(allCards = bundle.cards)
+                    Triple(ids, applyFilters(previewState), inspected)
+                }
+                _uiState.update { latest ->
+                    val updated = latest.copy(
                         isConnectedToMikrotik = bundle.connected,
+                        totalCardsCount = if (latest.totalCardsCount > 0) latest.totalCardsCount else bundle.cards.size,
                         allCards = bundle.cards,
-                        packages = bundle.pkgs,
                         templates = bundle.templates,
-                        selectedCardIds = current.selectedCardIds.intersect(validIds),
-                        inspectedCard = refreshedInspected
+                        selectedCardIds = validIds,
+                        inspectedCard = refreshedInspected,
+                        filteredCards = if (
+                            latest.selectedStatus == current.selectedStatus &&
+                            latest.selectedCategory == current.selectedCategory &&
+                            latest.appliedPrintDate == current.appliedPrintDate &&
+                            latest.usernameQuery == current.usernameQuery
+                        ) {
+                            filtered
+                        } else {
+                            applyFilters(latest.copy(allCards = bundle.cards))
+                        }
                     )
-                    updated.copy(filteredCards = applyFilters(updated))
+                    updated
                 }
             }
         }
@@ -84,37 +137,43 @@ class UserManagerCardsViewModel(
     fun onPrintDateQueryChange(value: String) = _uiState.update { it.copy(printDateQuery = value) }
 
     fun applyPrintDateSearch() {
-        _uiState.update { current ->
-            val updated = current.copy(appliedPrintDate = current.printDateQuery.trim())
-            updated.copy(filteredCards = applyFilters(updated))
-        }
+        updateFiltersAsync { it.copy(appliedPrintDate = it.printDateQuery.trim()) }
     }
 
     fun clearDateSearch() {
-        _uiState.update { current ->
-            val updated = current.copy(printDateQuery = "", appliedPrintDate = "")
-            updated.copy(filteredCards = applyFilters(updated))
-        }
+        updateFiltersAsync { it.copy(printDateQuery = "", appliedPrintDate = "") }
     }
 
     fun onUsernameQueryChange(value: String) {
-        _uiState.update { current ->
-            val updated = current.copy(usernameQuery = value)
-            updated.copy(filteredCards = applyFilters(updated))
-        }
+        updateFiltersAsync { it.copy(usernameQuery = value) }
     }
 
     fun onStatusSelected(status: CardStatus?) {
-        _uiState.update { current ->
-            val updated = current.copy(selectedStatus = status)
-            updated.copy(filteredCards = applyFilters(updated))
-        }
+        updateFiltersAsync { it.copy(selectedStatus = status) }
     }
 
     fun onCategorySelected(category: String) {
-        _uiState.update { current ->
-            val updated = current.copy(selectedCategory = category)
-            updated.copy(filteredCards = applyFilters(updated))
+        updateFiltersAsync { it.copy(selectedCategory = category) }
+    }
+
+    private fun updateFiltersAsync(transform: (UserManagerCardsUiState) -> UserManagerCardsUiState) {
+        _uiState.update(transform)
+        val snapshot = _uiState.value
+        viewModelScope.launch {
+            val filtered = withContext(Dispatchers.Default) { applyFilters(snapshot) }
+            _uiState.update { latest ->
+                if (
+                    latest.selectedStatus == snapshot.selectedStatus &&
+                    latest.selectedCategory == snapshot.selectedCategory &&
+                    latest.appliedPrintDate == snapshot.appliedPrintDate &&
+                    latest.usernameQuery == snapshot.usernameQuery &&
+                    latest.allCards === snapshot.allCards
+                ) {
+                    latest.copy(filteredCards = filtered)
+                } else {
+                    latest
+                }
+            }
         }
     }
 
@@ -293,6 +352,7 @@ class UserManagerCardsViewModel(
             _uiState.update { it.copy(errorMessage = "لا يوجد اتصال فعلي بالمايكروتيك.") }
             return
         }
+        if (_uiState.value.isSyncing) return
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true, errorMessage = null) }
             MikrotikSyncManager.syncFromMikrotik(
@@ -302,10 +362,11 @@ class UserManagerCardsViewModel(
                 onProgress = { _, _ -> }
             ).onSuccess { summary ->
                 LocalSessionHolder.updateConnectionStatus(true, summary.systemStatus, null)
+                LocalSessionHolder.updateLiveReportsMetrics(summary.liveReportsMetrics)
                 _uiState.update {
                     it.copy(
                         isSyncing = false,
-                        statusMessage = "تم تحديث الكروت والجلسات بالكامل (${summary.cardsSynced} كرت • ${summary.packagesSynced} باقة)."
+                        statusMessage = "تم تحديث جميع بيانات يوزر منجر (${summary.cardsSynced} كرت • ${summary.packagesSynced} باقة)."
                     )
                 }
             }.onFailure { err ->
@@ -407,17 +468,19 @@ class UserManagerCardsViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isImporting = true, errorMessage = null) }
             val state = _uiState.value
-            val existingUsernames = state.allCards.map { it.username }.toSet()
+            val existingUsernames = repository.getAllUsernamesOnce().toSet()
             val defaultPkg = state.packages.firstOrNull()
             val serverAccount = LocalSessionHolder.activeSession.value?.username.orEmpty()
-            val result = CardImportParser.parseTextOrCsv(
-                rawContent = rawContent,
-                defaultPackageName = defaultPkg?.name.orEmpty(),
-                defaultPrice = defaultPkg?.price ?: 0.0,
-                serverAccount = serverAccount,
-                sourceFileName = fileName,
-                existingUsernames = existingUsernames
-            )
+            val result = withContext(Dispatchers.Default) {
+                CardImportParser.parseTextOrCsv(
+                    rawContent = rawContent,
+                    defaultPackageName = defaultPkg?.name.orEmpty(),
+                    defaultPrice = defaultPkg?.price ?: 0.0,
+                    serverAccount = serverAccount,
+                    sourceFileName = fileName,
+                    existingUsernames = existingUsernames
+                )
+            }
             if (result.parsedCards.isEmpty()) {
                 _uiState.update {
                     it.copy(
@@ -478,7 +541,6 @@ class UserManagerCardsViewModel(
     private data class CardsBundle(
         val connected: Boolean,
         val cards: List<CardEntity>,
-        val pkgs: List<CardPackageEntity>,
         val templates: List<CardTemplateEntity>
     )
 }

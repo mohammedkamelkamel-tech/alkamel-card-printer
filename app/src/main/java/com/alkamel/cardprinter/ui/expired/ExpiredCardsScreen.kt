@@ -17,8 +17,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.PersonOff
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -26,6 +26,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -78,7 +79,27 @@ fun ExpiredCardsScreen(
         topBar = {
             AlkamelTopHeader(
                 title = "كروت يوزر منجر المنتهية (${state.filteredExpired.size})",
-                onNavigateBack = onNavigateBack
+                onNavigateBack = onNavigateBack,
+                trailingAction = {
+                    IconButton(
+                        onClick = viewModel::syncFromMikrotik,
+                        enabled = !state.isSyncing && state.isConnectedToMikrotik
+                    ) {
+                        if (state.isSyncing) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "تحديث الكروت المنتهية من يوزر منجر",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
             )
         }
     ) { innerPadding ->
@@ -226,7 +247,7 @@ private fun BurgundyExpiredCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("الباقة: ${card.packageName}", color = Color.White, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                Text("الباقة: ${card.packageName.ifBlank { "-" }}", color = Color.White, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                 Text("الاستهلاك: ${card.dataUsageLabel}", color = Color(0xFFFFCDD2), style = MaterialTheme.typography.labelMedium)
                 Text("المدة: ${card.uptimeLabel}", color = Color(0xFFFFCDD2), style = MaterialTheme.typography.labelMedium)
             }

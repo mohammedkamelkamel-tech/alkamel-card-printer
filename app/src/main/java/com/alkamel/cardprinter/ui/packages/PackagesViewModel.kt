@@ -3,15 +3,21 @@ package com.alkamel.cardprinter.ui.packages
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
+import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
+import com.alkamel.cardprinter.data.session.LocalSessionHolder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class PackagesUiState(
     val packages: List<CardPackageEntity> = emptyList(),
+    val cardCountsByPackage: Map<String, Int> = emptyMap(),
+    val isConnectedToMikrotik: Boolean = false,
+    val isSyncing: Boolean = false,
     val showEditorDialog: Boolean = false,
     val editingId: Long = 0L,
     val nameInput: String = "",
@@ -32,8 +38,55 @@ class PackagesViewModel(
 
     init {
         viewModelScope.launch {
-            repository.observeAllPackages().collect { list ->
-                _uiState.update { it.copy(packages = list) }
+            combine(
+                LocalSessionHolder.activeSession,
+                repository.observeAllPackages(),
+                repository.observePackageCardCounts()
+            ) { session, list, counts ->
+                val countMap = counts.associate { it.packageName.trim().lowercase() to it.cardsCount }
+                Triple(session?.isConnectedToMikrotik == true, list, countMap)
+            }.collect { (connected, list, countMap) ->
+                _uiState.update {
+                    it.copy(
+                        isConnectedToMikrotik = connected,
+                        packages = list,
+                        cardCountsByPackage = countMap
+                    )
+                }
+            }
+        }
+    }
+
+    fun syncFromMikrotik() {
+        val session = LocalSessionHolder.activeSession.value
+        if (session == null || session.hostAddress.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "لا يوجد اتصال فعلي بسيرفر يوزر منجر.") }
+            return
+        }
+        if (_uiState.value.isSyncing) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSyncing = true, errorMessage = null) }
+            MikrotikSyncManager.syncFromMikrotik(
+                credentials = session.toCredentials(),
+                loadType = session.loadType,
+                repository = repository,
+                onProgress = { _, _ -> }
+            ).onSuccess { summary ->
+                LocalSessionHolder.updateConnectionStatus(true, summary.systemStatus, null)
+                LocalSessionHolder.updateLiveReportsMetrics(summary.liveReportsMetrics)
+                _uiState.update {
+                    it.copy(
+                        isSyncing = false,
+                        statusMessage = "تم تحديث باقات وكروت يوزر منجر (${summary.packagesSynced} باقة • ${summary.cardsSynced} كرت)."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isSyncing = false,
+                        errorMessage = err.localizedMessage ?: "تعذر مزامنة الباقات من المايكروتيك."
+                    )
+                }
             }
         }
     }
@@ -95,7 +148,7 @@ class PackagesViewModel(
                     _uiState.update {
                         it.copy(
                             showEditorDialog = false,
-                            statusMessage = "تم حفظ الباقة ($name) بنجاح."
+                            statusMessage = "تم حفظ الباقة ($name) وتحديث أسعار كروتها بنجاح."
                         )
                     }
                 }

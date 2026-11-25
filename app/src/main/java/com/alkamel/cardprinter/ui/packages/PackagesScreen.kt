@@ -20,11 +20,13 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -75,7 +77,27 @@ fun PackagesScreen(
         topBar = {
             AlkamelTopHeader(
                 title = "باقات يوزر منجر (${state.packages.size})",
-                onNavigateBack = onNavigateBack
+                onNavigateBack = onNavigateBack,
+                trailingAction = {
+                    IconButton(
+                        onClick = viewModel::syncFromMikrotik,
+                        enabled = !state.isSyncing && state.isConnectedToMikrotik
+                    ) {
+                        if (state.isSyncing) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "مزامنة باقات يوزر منجر",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
             )
         },
         floatingActionButton = {
@@ -98,7 +120,7 @@ fun PackagesScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "لا توجد باقات يوزر منجر حالياً.\nقم بالربط بسيرفر يوزر منجر ومزامنة الباقات تلقائياً أو أضف باقة مطابقة لاسم الـ Profile في يوزر منجر عبر زر (+).",
+                    text = "لا توجد باقات يوزر منجر حالياً.\nاضغط أيقونة التحديث بالأعلى لجلب جميع الباقات من يوزر منجر أو أضف باقة عبر زر (+).",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -113,6 +135,7 @@ fun PackagesScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(state.packages, key = { it.id }) { pkg ->
+                    val pkgCardsCount = state.cardCountsByPackage[pkg.name.trim().lowercase()] ?: 0
                     Card(
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -147,7 +170,7 @@ fun PackagesScreen(
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "السعر: ${pkg.price.toLong()} ريال • العمولة: ${pkg.commission.toLong()} ريال",
+                                        text = "السعر: ${pkg.price.toLong()} ريال • العمولة: ${pkg.commission.toLong()} ريال • الكروت: $pkgCardsCount",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = ext.voucherGreen,
                                         fontWeight = FontWeight.SemiBold

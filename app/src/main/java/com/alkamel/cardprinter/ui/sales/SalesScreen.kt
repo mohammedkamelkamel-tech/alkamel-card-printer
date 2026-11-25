@@ -18,22 +18,29 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ReceiptLong
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,13 +59,43 @@ fun SalesScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val ext = AlkamelTheme.extendedColors
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(state.statusMessage, state.errorMessage) {
+        val msg = state.errorMessage ?: state.statusMessage
+        if (!msg.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearMessages()
+        }
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             AlkamelTopHeader(
                 title = "مبيعات يوزر منجر",
-                onNavigateBack = onNavigateBack
+                onNavigateBack = onNavigateBack,
+                trailingAction = {
+                    IconButton(
+                        onClick = viewModel::syncSalesFromMikrotik,
+                        enabled = !state.isSyncing && state.isConnectedToMikrotik
+                    ) {
+                        if (state.isSyncing) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "تحديث مبيعات يوزر منجر",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
             )
         }
     ) { innerPadding ->
@@ -173,7 +210,7 @@ fun SalesScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "لا توجد مبيعات مسجلة في النطاق المحدد.",
+                        text = "لا توجد مبيعات مسجلة في النطاق المحدد.\nاضغط أيقونة التحديث بالأعلى لمزامنة مبيعات وجلسات يوزر منجر.",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -215,7 +252,8 @@ private fun SaleOperationCard(log: PrintSalesLogEntity) {
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Box(
                         modifier = Modifier
@@ -234,7 +272,7 @@ private fun SaleOperationCard(log: PrintSalesLogEntity) {
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "الباقة: ${log.packageName.ifBlank { "-" }} • العدد: ${log.cardsCount}",
+                            text = "الباقة: ${log.packageName.ifBlank { "-" }} • العدد: ${log.cardsCount} • ${log.operationType.arabicLabel}",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -266,7 +304,7 @@ private fun SaleOperationCard(log: PrintSalesLogEntity) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = DateTimeUtils.formatDisplayDateTime(log.createdAt),
+                    text = log.dateKey.ifBlank { DateTimeUtils.formatDisplayDateTime(log.createdAt) },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

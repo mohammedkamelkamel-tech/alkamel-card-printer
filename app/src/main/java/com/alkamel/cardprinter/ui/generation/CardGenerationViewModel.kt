@@ -2,22 +2,27 @@ package com.alkamel.cardprinter.ui.generation
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardPackageEntity
+import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
+import com.alkamel.cardprinter.data.local.model.CardCountsSummary
+import com.alkamel.cardprinter.data.local.model.NetworkLoadType
 import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
+import com.alkamel.cardprinter.data.printing.CardLayoutMetrics
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
+import com.alkamel.cardprinter.data.session.ActiveSession
 import com.alkamel.cardprinter.data.session.LocalSessionHolder
 import com.alkamel.cardprinter.data.session.PrintQueueHolder
 import com.alkamel.cardprinter.data.util.CardGenerationConfig
 import com.alkamel.cardprinter.data.util.CardGeneratorEngine
 import com.alkamel.cardprinter.data.util.GenerationCharset
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class CardGenerationViewModel(
     private val repository: CardPrinterRepository
@@ -26,19 +31,16 @@ class CardGenerationViewModel(
     private val _uiState = MutableStateFlow(CardGenerationUiState())
     val uiState: StateFlow<CardGenerationUiState> = _uiState.asStateFlow()
 
-    private var cachedExistingUsernames: Set<String> = emptySet()
-
     init {
         viewModelScope.launch {
             combine(
                 LocalSessionHolder.activeSession,
                 repository.observeAllPackages(),
                 repository.observeAllTemplates(),
-                repository.observeAllCards()
-            ) { session, pkgs, templates, cards ->
-                GenerationInputs(session, pkgs, templates, cards)
+                repository.observeCardCounts()
+            ) { session, pkgs, templates, counts ->
+                GenerationInputs(session, pkgs, templates, counts)
             }.collect { input ->
-                cachedExistingUsernames = input.cards.map { it.username }.toSet()
                 val session = input.session
                 val connected = session?.isConnectedToMikrotik == true
                 val hostLabel = session?.takeIf { it.hostAddress.isNotBlank() }?.let { "${it.hostAddress}:${it.port}" }.orEmpty()
@@ -129,30 +131,35 @@ class CardGenerationViewModel(
             bindFirstDevice = state.bindFirstDevice
         )
 
-        val generated = CardGeneratorEngine.generateCards(
-            config = config,
-            existingUsernames = cachedExistingUsernames
-        )
-
-        if (generated.isEmpty()) {
-            _uiState.update {
-                it.copy(errorMessage = "تعذر توليد كروت فريدة بهذه الإعدادات. جرّب زيادة طول اسم المستخدم.")
+        viewModelScope.launch {
+            val existingUsernames = repository.getAllUsernamesOnce().toSet()
+            val generated = withContext(Dispatchers.Default) {
+                CardGeneratorEngine.generateCards(
+                    config = config,
+                    existingUsernames = existingUsernames
+                )
             }
-            return
-        }
 
-        _uiState.update {
-            it.copy(
-                generatedCards = generated,
-                isAddedToServer = false,
-                additionCompleted = false,
-                additionProgressPercent = 0,
-                addedCardsCount = 0,
-                failedCardsCount = 0,
-                targetAdditionCount = generated.size,
-                modalErrorMessage = null,
-                statusMessage = "تم توليد ${generated.size} كرت. اضغط «اضافة الى السرفر» لرفعها إلى المايكروتيك."
-            )
+            if (generated.isEmpty()) {
+                _uiState.update {
+                    it.copy(errorMessage = "تعذر توليد كروت فريدة بهذه الإعدادات. جرّب زيادة طول اسم المستخدم.")
+                }
+                return@launch
+            }
+
+            _uiState.update {
+                it.copy(
+                    generatedCards = generated,
+                    isAddedToServer = false,
+                    additionCompleted = false,
+                    additionProgressPercent = 0,
+                    addedCardsCount = 0,
+                    failedCardsCount = 0,
+                    targetAdditionCount = generated.size,
+                    modalErrorMessage = null,
+                    statusMessage = "تم توليد ${generated.size} كرت. اضغط «اضافة الى السرفر» لرفعها إلى يوزر منجر."
+                )
+            }
         }
     }
 
@@ -192,7 +199,7 @@ class CardGenerationViewModel(
 
             val pushResult = MikrotikSyncManager.pushCardsToMikrotik(
                 credentials = session.toCredentials(),
-                loadType = com.alkamel.cardprinter.data.local.model.NetworkLoadType.LOAD_USER_MANAGER,
+                loadType = NetworkLoadType.LOAD_USER_MANAGER,
                 cards = cardsToPush,
                 repository = repository,
                 onProgress = { prog ->
@@ -208,7 +215,7 @@ class CardGenerationViewModel(
 
             pushResult.onSuccess { pushed ->
                 val pushedUsernames = pushed.map { it.username }.toSet()
-                val persistedCards = repository.observeAllCards().first()
+                val persistedCards = repository.getAllCardsOnce()
                     .filter { it.username in pushedUsernames }
                 val resolvedCards = if (persistedCards.isNotEmpty()) persistedCards else pushed
 
@@ -250,7 +257,7 @@ class CardGenerationViewModel(
             return false
         }
         val pkgName = state.selectedPackageName
-        val matchingTemplate = com.alkamel.cardprinter.data.printing.CardLayoutMetrics.selectBestTemplateForPackage(
+        val matchingTemplate = CardLayoutMetrics.selectBestTemplateForPackage(
             templates = state.templates,
             packageName = pkgName
         )
@@ -260,9 +267,9 @@ class CardGenerationViewModel(
     }
 
     private data class GenerationInputs(
-        val session: com.alkamel.cardprinter.data.session.ActiveSession?,
+        val session: ActiveSession?,
         val packages: List<CardPackageEntity>,
-        val templates: List<com.alkamel.cardprinter.data.local.entity.CardTemplateEntity>,
-        val cards: List<CardEntity>
+        val templates: List<CardTemplateEntity>,
+        val counts: CardCountsSummary
     )
 }

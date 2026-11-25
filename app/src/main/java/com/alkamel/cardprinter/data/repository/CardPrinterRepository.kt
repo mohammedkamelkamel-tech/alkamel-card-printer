@@ -8,8 +8,11 @@ import com.alkamel.cardprinter.data.local.entity.CardSessionEntity
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
 import com.alkamel.cardprinter.data.local.entity.PrintSalesLogEntity
 import com.alkamel.cardprinter.data.local.entity.SavedNetworkEntity
+import com.alkamel.cardprinter.data.local.model.CardCountsSummary
 import com.alkamel.cardprinter.data.local.model.ComprehensiveSalesReport
+import com.alkamel.cardprinter.data.local.model.PackageCardCount
 import com.alkamel.cardprinter.data.local.model.PeriodSalesSummary
+import com.alkamel.cardprinter.data.local.model.SaleOperationType
 import com.alkamel.cardprinter.data.local.model.TopSellingPackageStat
 import com.alkamel.cardprinter.data.local.util.DateTimeUtils
 import kotlinx.coroutines.CancellationException
@@ -40,38 +43,57 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
     suspend fun deleteNetwork(network: SavedNetworkEntity): Result<Unit> = safeDbCall { networkDao.deleteNetwork(network) }
 
     fun observeAllPackages(): Flow<List<CardPackageEntity>> = packageDao.observeAllPackages()
+    fun observePackageCount(): Flow<Int> = packageDao.observePackageCount()
     suspend fun getAllPackagesOnce(): List<CardPackageEntity> = packageDao.getAllPackagesOnce()
-    suspend fun savePackage(pkg: CardPackageEntity): Result<Long> = safeDbCall { packageDao.upsertPackage(pkg) }
+
+    suspend fun savePackage(pkg: CardPackageEntity): Result<Long> = safeDbCall {
+        database.withTransaction {
+            val id = packageDao.upsertPackage(pkg)
+            if (pkg.name.isNotBlank() && pkg.price > 0.0) {
+                cardDao.updatePriceForPackage(pkg.name.trim(), pkg.price)
+            }
+            id
+        }
+    }
+
     suspend fun deletePackage(pkg: CardPackageEntity): Result<Unit> = safeDbCall { packageDao.deletePackage(pkg) }
 
     /**
-     * Merges MikroTik profiles into Room while preserving any custom price/commission
+     * Merges MikroTik User Manager profiles into Room while preserving any custom price/commission
      * configured locally by the operator when MikroTik returns 0.0 for price.
      */
     suspend fun mergePackagesFromMikrotik(remotePackages: List<CardPackageEntity>): Result<List<CardPackageEntity>> =
         safeDbCall {
-            val existingByName = packageDao.getAllPackagesOnce().associateBy { it.name.lowercase() }
+            val existingList = packageDao.getAllPackagesOnce()
+            val existingByName = existingList.associateBy { it.name.trim().lowercase() }
             val merged = remotePackages.map { remote ->
-                val existing = existingByName[remote.name.lowercase()]
+                val cleanName = remote.name.trim()
+                val existing = existingByName[cleanName.lowercase()]
                 if (existing != null) {
                     remote.copy(
                         id = existing.id,
+                        name = cleanName,
                         price = if (remote.price > 0.0) remote.price else existing.price,
                         commission = if (existing.commission > 0.0) existing.commission else remote.commission,
                         validityLabel = remote.validityLabel.ifBlank { existing.validityLabel },
                         dataLimitMb = if (remote.dataLimitMb > 0.0) remote.dataLimitMb else existing.dataLimitMb
                     )
                 } else {
-                    remote
+                    remote.copy(name = cleanName)
                 }
             }
             database.withTransaction {
                 merged.forEach { packageDao.upsertPackage(it) }
             }
-            merged
+            packageDao.getAllPackagesOnce()
         }
 
     fun observeAllCards(): Flow<List<CardEntity>> = cardDao.observeAllCards()
+    fun observeExpiredCards(): Flow<List<CardEntity>> = cardDao.observeExpiredCards()
+    fun observeCardCounts(): Flow<CardCountsSummary> = cardDao.observeCardCounts()
+    fun observePackageCardCounts(): Flow<List<PackageCardCount>> = cardDao.observePackageCardCounts()
+    suspend fun getAllCardsOnce(): List<CardEntity> = cardDao.getAllCardsOnce()
+    suspend fun getAllUsernamesOnce(): List<String> = cardDao.getAllUsernamesOnce()
 
     suspend fun insertCardsIgnoringDuplicates(cards: List<CardEntity>): Result<Int> = safeDbCall {
         if (cards.isEmpty()) return@safeDbCall 0
@@ -87,7 +109,7 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
     suspend fun upsertCards(cards: List<CardEntity>): Result<Int> = safeDbCall {
         if (cards.isEmpty()) return@safeDbCall 0
         database.withTransaction {
-            val existingByUsername = cardDao.getAllCardsOnce().associateBy { it.username }
+            val existingByUsername = cardDao.getAllCardSyncMetaOnce().associateBy { it.username }
             val merged = cards.map { incoming ->
                 val existing = existingByUsername[incoming.username]
                 if (existing != null) {
@@ -96,7 +118,8 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
                         price = if (incoming.price > 0.0) incoming.price else existing.price,
                         isPrinted = existing.isPrinted,
                         printedAt = existing.printedAt,
-                        printedDateKey = existing.printedDateKey
+                        printedDateKey = existing.printedDateKey,
+                        createdAt = existing.createdAt
                     )
                 } else {
                     incoming
@@ -109,7 +132,70 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
         cards.size
     }
 
-    suspend fun syncCardsFromMikrotik(remoteCards: List<CardEntity>): Result<Int> = upsertCards(remoteCards)
+    /**
+     * Authoritatively synchronizes the full User Manager card set into Room in a single atomic transaction.
+     * Uses lightweight [CardSyncMeta] to handle 50,000+ cards without CursorWindow or OOM issues.
+     * When [isCompleteSnapshot] is true, removes stale MikroTik-origin cards that were deleted on the router
+     * while preserving locally imported offline cards (sourceFileName != null && mikrotikId == null).
+     */
+    suspend fun syncCardsFromMikrotik(
+        remoteCards: List<CardEntity>,
+        isCompleteSnapshot: Boolean = true
+    ): Result<Int> = safeDbCall {
+        database.withTransaction {
+            val existingMeta = cardDao.getAllCardSyncMetaOnce()
+            val existingByUsername = HashMap<String, com.alkamel.cardprinter.data.local.model.CardSyncMeta>(
+                (existingMeta.size * 1.4f).toInt().coerceAtLeast(16)
+            )
+            existingMeta.forEach { existingByUsername[it.username] = it }
+
+            val remoteUsernames = HashSet<String>((remoteCards.size * 1.4f).toInt().coerceAtLeast(16))
+            val batchBuffer = ArrayList<CardEntity>(500)
+
+            for (incoming in remoteCards) {
+                remoteUsernames.add(incoming.username)
+                val existing = existingByUsername[incoming.username]
+                val resolved = if (existing != null) {
+                    incoming.copy(
+                        id = existing.id,
+                        price = if (incoming.price > 0.0) incoming.price else existing.price,
+                        isPrinted = existing.isPrinted,
+                        printedAt = existing.printedAt,
+                        printedDateKey = existing.printedDateKey,
+                        createdAt = existing.createdAt,
+                        sourceFileName = incoming.sourceFileName ?: existing.sourceFileName
+                    )
+                } else {
+                    incoming
+                }
+                batchBuffer.add(resolved)
+                if (batchBuffer.size >= 500) {
+                    cardDao.upsertCards(batchBuffer)
+                    batchBuffer.clear()
+                }
+            }
+            if (batchBuffer.isNotEmpty()) {
+                cardDao.upsertCards(batchBuffer)
+                batchBuffer.clear()
+            }
+
+            if (isCompleteSnapshot) {
+                val staleIds = existingMeta
+                    .filter { meta ->
+                        val isLocallyImportedOnly = meta.mikrotikId.isNullOrBlank() && !meta.sourceFileName.isNullOrBlank()
+                        !isLocallyImportedOnly && meta.username !in remoteUsernames
+                    }
+                    .map { it.id }
+
+                if (staleIds.isNotEmpty()) {
+                    staleIds.chunked(500).forEach { chunk ->
+                        cardDao.deleteCardsByIds(chunk)
+                    }
+                }
+            }
+        }
+        remoteCards.size
+    }
 
     suspend fun markCardsAsPrinted(cardIds: List<Long>, printedAt: Long, dateKey: String): Result<Unit> = safeDbCall {
         if (cardIds.isEmpty()) return@safeDbCall
@@ -164,6 +250,20 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
     suspend fun recordSalesLog(log: PrintSalesLogEntity): Result<Long> = safeDbCall { salesDao.insertSalesLog(log) }
     suspend fun deleteSalesLog(logId: Long): Result<Unit> = safeDbCall { salesDao.deleteSalesLogById(logId) }
 
+    /**
+     * Atomically replaces synced MikroTik User Manager sales logs ([SaleOperationType.DIRECT_SALE])
+     * while preserving all local A4 print/export sales records ([SaleOperationType.PRINT_SALE], [SaleOperationType.BATCH_EXPORT]).
+     */
+    suspend fun replaceSyncedMikrotikSalesLogs(remoteSalesLogs: List<PrintSalesLogEntity>): Result<Int> = safeDbCall {
+        database.withTransaction {
+            salesDao.deleteSalesLogsByOperationType(SaleOperationType.DIRECT_SALE)
+            remoteSalesLogs.chunked(500).forEach { chunk ->
+                salesDao.insertSalesLogs(chunk)
+            }
+        }
+        remoteSalesLogs.size
+    }
+
     fun observeComprehensiveSalesReport(): Flow<ComprehensiveSalesReport> =
         salesDao.observeAllSalesLogs().map { logs ->
             val today = DateTimeUtils.todayDateKey()
@@ -178,7 +278,10 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
             )
 
             val monthLogs = logs.filter { it.dateKey >= monthStart }
-            val topPkg = monthLogs.groupBy { it.packageName }
+            val topSource = if (monthLogs.isNotEmpty()) monthLogs else logs
+            val topPkg = topSource
+                .filter { it.packageName.isNotBlank() }
+                .groupBy { it.packageName }
                 .map { (name, items) ->
                     TopSellingPackageStat(
                         packageName = name,

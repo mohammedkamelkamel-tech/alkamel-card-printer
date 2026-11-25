@@ -30,7 +30,9 @@ data class MikrotikSyncSummary(
     val systemStatus: MikrotikSystemStatus,
     val packagesSynced: Int,
     val cardsSynced: Int,
-    val activeSessionsCount: Int
+    val activeSessionsCount: Int,
+    val salesSynced: Int = 0,
+    val liveReportsMetrics: MikrotikLiveReportsMetrics? = null
 )
 
 data class MikrotikPushCardProgress(
@@ -42,8 +44,8 @@ data class MikrotikPushCardProgress(
 )
 
 /**
- * Live metrics aggregated directly from MikroTik sessions, active connections,
- * and payments (RouterOS v6 & v7) for the Reports & Statistics screen.
+ * Live metrics aggregated directly from MikroTik User Manager sessions,
+ * active connections, and payments (RouterOS v6 & v7) for Dashboard, Sales & Reports.
  */
 data class MikrotikLiveReportsMetrics(
     val todayDownloadBytes: Long = 0L,
@@ -52,6 +54,7 @@ data class MikrotikLiveReportsMetrics(
     val yesterdaySales: PeriodSalesSummary = PeriodSalesSummary(),
     val weeklySales: PeriodSalesSummary = PeriodSalesSummary(),
     val monthlySales: PeriodSalesSummary = PeriodSalesSummary(),
+    val allTimeSales: PeriodSalesSummary = PeriodSalesSummary(),
     val sessionsScannedCount: Int = 0,
     val paymentsScannedCount: Int = 0,
     val sourceNote: String = "",

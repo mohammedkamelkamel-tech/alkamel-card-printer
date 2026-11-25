@@ -14,6 +14,9 @@ interface CardPackageDao {
     @Query("SELECT * FROM card_packages ORDER BY price ASC, name ASC")
     fun observeAllPackages(): Flow<List<CardPackageEntity>>
 
+    @Query("SELECT COUNT(*) FROM card_packages")
+    fun observePackageCount(): Flow<Int>
+
     @Query("SELECT * FROM card_packages")
     suspend fun getAllPackagesOnce(): List<CardPackageEntity>
 
