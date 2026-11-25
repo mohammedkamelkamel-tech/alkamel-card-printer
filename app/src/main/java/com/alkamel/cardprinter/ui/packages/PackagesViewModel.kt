@@ -59,7 +59,7 @@ class PackagesViewModel(
 
     fun syncFromMikrotik() {
         val session = LocalSessionHolder.activeSession.value
-        if (session == null || session.hostAddress.isBlank()) {
+        if (session == null || !session.hasConfiguredRouter) {
             _uiState.update { it.copy(errorMessage = "لا يوجد اتصال فعلي بسيرفر يوزر منجر.") }
             return
         }
@@ -70,7 +70,10 @@ class PackagesViewModel(
                 credentials = session.toCredentials(),
                 loadType = session.loadType,
                 repository = repository,
-                onProgress = { _, _ -> }
+                onProgress = { _, _ -> },
+                onSystemStatusReady = { liveStatus ->
+                    LocalSessionHolder.updateConnectionStatus(true, liveStatus, null)
+                }
             ).onSuccess { summary ->
                 LocalSessionHolder.updateConnectionStatus(true, summary.systemStatus, null)
                 LocalSessionHolder.updateLiveReportsMetrics(summary.liveReportsMetrics)

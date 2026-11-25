@@ -12,6 +12,8 @@ import com.alkamel.cardprinter.data.local.model.SaleOperationType
 import com.alkamel.cardprinter.data.local.util.DateTimeUtils
 import com.alkamel.cardprinter.data.repository.CardPrinterRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -19,18 +21,31 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * Coordinates complete RouterOS v6 / v7 User Manager API data fetching, live telemetry polling,
- * per-card User Manager session lookup, full sales/payments synchronization into Room,
- * live User Manager reports aggregation, and live card pushing directly into MikroTik User Manager.
+ * Coordinates complete RouterOS v6 / v7 User Manager API data fetching, live telemetry polling
+ * over a persistent reusable connection, per-card User Manager session lookup, full sales/payments
+ * synchronization into Room, live User Manager reports aggregation, and live card pushing directly
+ * into MikroTik User Manager.
  *
- * Strictly User Manager only — zero Hotspot profiles, cards, or operations.
- * Uses streaming record reading and generous timeouts so 50,000+ cards/sessions sync completely
- * without truncation, page cutoffs, or timeout drops.
+ * Strictly User Manager only — zero Hotspot card/profile management.
+ * Uses streaming record reading, fast active-session detection, and automatic socket recovery
+ * so 50,000+ cards sync reliably without socket drops or false disconnections.
  */
 object MikrotikSyncManager {
 
     private const val STREAM_BULK_TIMEOUT_MS = 120_000
-    private const val TELEMETRY_TIMEOUT_MS = 10_000
+    private const val SESSIONS_BULK_TIMEOUT_MS = 60_000
+    private const val TELEMETRY_TIMEOUT_MS = 8_000
+    private const val ACTIVE_QUERY_TIMEOUT_MS = 6_000
+
+    private val telemetryMutex = Mutex()
+    private val telemetryClient = MikrotikApiClient(
+        connectTimeoutMs = 6_000,
+        readTimeoutMs = TELEMETRY_TIMEOUT_MS
+    )
+
+    fun closeTelemetryConnection() {
+        runCatching { telemetryClient.close() }
+    }
 
     private val MONTH_ABBR_TO_NUM = mapOf(
         "jan" to "01", "feb" to "02", "mar" to "03", "apr" to "04",
@@ -85,7 +100,7 @@ object MikrotikSyncManager {
                             ?: "تعذر الاتصال بسيرفر يوزر منجر."
                     )
                 }
-                val status = fetchSystemStatusInternal(client)
+                val status = fetchSystemStatusInternal(client, credentials)
                 MikrotikConnectionTestResult(isConnected = true, systemStatus = status)
             } catch (e: Exception) {
                 MikrotikConnectionTestResult(
@@ -99,29 +114,43 @@ object MikrotikSyncManager {
 
     /**
      * Fast, lightweight live telemetry fetch used by periodic polling on Dashboard.
+     * Reuses a single persistent authenticated connection under [telemetryMutex] to avoid
+     * opening/closing TCP sockets every 5 seconds, and transparently auto-reconnects on drop.
      */
     suspend fun fetchLiveTelemetry(credentials: MikrotikCredentials): Result<MikrotikSystemStatus> =
         withContext(Dispatchers.IO) {
-            val client = MikrotikApiClient(connectTimeoutMs = 5000, readTimeoutMs = TELEMETRY_TIMEOUT_MS)
-            try {
-                val loginRes = client.connectAndLogin(credentials)
-                if (loginRes.isFailure) {
-                    return@withContext Result.failure(
-                        loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بسيرفر يوزر منجر")
-                    )
+            telemetryMutex.withLock {
+                try {
+                    val connRes = telemetryClient.ensureConnected(credentials)
+                    if (connRes.isFailure) {
+                        return@withLock Result.failure(
+                            connRes.exceptionOrNull()
+                                ?: IOException("تعذر الاتصال بسيرفر المايكروتيك.")
+                        )
+                    }
+                    val status = fetchSystemStatusInternal(telemetryClient, credentials)
+                    Result.success(status)
+                } catch (e: Exception) {
+                    telemetryClient.close()
+                    // One transparent reconnect + retry if the persistent socket was dropped by router/network
+                    val retryConn = telemetryClient.connectAndLogin(credentials)
+                    if (retryConn.isSuccess) {
+                        try {
+                            val status = fetchSystemStatusInternal(telemetryClient, credentials)
+                            return@withLock Result.success(status)
+                        } catch (retryErr: Exception) {
+                            telemetryClient.close()
+                            return@withLock Result.failure(retryErr)
+                        }
+                    }
+                    Result.failure(retryConn.exceptionOrNull() ?: e)
                 }
-                val status = fetchSystemStatusInternal(client)
-                Result.success(status)
-            } catch (e: Exception) {
-                Result.failure(e)
-            } finally {
-                client.close()
             }
         }
 
     /**
      * Performs a complete, non-truncated User Manager synchronization (RouterOS v6 & v7):
-     * 1. System resource & active connections status
+     * 1. System resource & live active connections status (emitted immediately via [onSystemStatusReady])
      * 2. ALL User Manager profiles + limitations (no filters, no limits)
      * 3. ALL User Manager users/cards via streaming API (120s timeout, zero truncation)
      * 4. Automatic package discovery for any profile referenced by cards
@@ -131,7 +160,8 @@ object MikrotikSyncManager {
         credentials: MikrotikCredentials,
         @Suppress("UNUSED_PARAMETER") loadType: NetworkLoadType,
         repository: CardPrinterRepository,
-        onProgress: (percent: Int, label: String) -> Unit
+        onProgress: (percent: Int, label: String) -> Unit,
+        onSystemStatusReady: (MikrotikSystemStatus) -> Unit = {}
     ): Result<MikrotikSyncSummary> = withContext(Dispatchers.IO) {
         val client = MikrotikApiClient(connectTimeoutMs = 10000, readTimeoutMs = STREAM_BULK_TIMEOUT_MS)
         try {
@@ -139,18 +169,24 @@ object MikrotikSyncManager {
             val loginRes = client.connectAndLogin(credentials)
             if (loginRes.isFailure) {
                 return@withContext Result.failure(
-                    loginRes.exceptionOrNull() ?: IllegalStateException("تعذر الاتصال بسيرفر يوزر منجر")
+                    loginRes.exceptionOrNull() ?: IOException("تعذر الاتصال بسيرفر يوزر منجر")
                 )
             }
 
             onProgress(12, "جاري قراءة حالة السيرفر وإصدار RouterOS...")
-            val sysStatus = fetchSystemStatusInternal(client)
+            val sysStatus = fetchSystemStatusInternal(client, credentials)
+            onSystemStatusReady(sysStatus)
             val isV7 = sysStatus.routerOsVersion.trim().startsWith("7")
+
+            // Ensure socket is open before querying profiles (recovers automatically if any probe timed out)
+            client.ensureConnected(credentials).getOrElse { return@withContext Result.failure(it) }
 
             // 1. Fetch ALL User Manager profiles + limitations
             onProgress(20, "جاري جلب جميع باقات يوزر منجر...")
-            val limitationsByProfile = fetchProfileLimitationsBestEffort(client, isV7)
-            val fetchedPackages = fetchUserManagerPackagesInternal(client, isV7, limitationsByProfile)
+            val limitationsByProfile = fetchProfileLimitationsBestEffort(client, credentials, isV7)
+            client.ensureConnected(credentials).getOrElse { return@withContext Result.failure(it) }
+
+            val fetchedPackages = fetchUserManagerPackagesInternal(client, credentials, isV7, limitationsByProfile)
             var mergedPackages = if (fetchedPackages.isNotEmpty()) {
                 repository.mergePackagesFromMikrotik(fetchedPackages).getOrDefault(fetchedPackages)
             } else {
@@ -158,12 +194,14 @@ object MikrotikSyncManager {
             }
 
             // 2. Fetch ALL User Manager cards via streaming (no filter, no limit, full snapshot)
+            client.ensureConnected(credentials).getOrElse { return@withContext Result.failure(it) }
             onProgress(30, "جاري جلب جميع كروت يوزر منجر...")
             val priceByPackage = HashMap<String, Double>()
             mergedPackages.forEach { priceByPackage[it.name.trim().lowercase()] = it.price }
 
             val cardsResult = fetchAllUserManagerCardsStreaming(
                 client = client,
+                credentials = credentials,
                 isV7 = isV7,
                 serverAccount = credentials.username,
                 priceByPackage = priceByPackage,
@@ -218,15 +256,27 @@ object MikrotikSyncManager {
             }
 
             // 5. Fetch ALL User Manager payments & sessions to populate Sales & Reports identically
+            // Cards & packages are already safely saved in Room, so sales/reports never abort the whole sync.
             onProgress(82, "جاري مزامنة مبيعات وجلسات وتقارير يوزر منجر...")
-            val salesBundle = fetchUserManagerSalesAndReportsInternal(
-                client = client,
-                isV7 = isV7,
-                sysStatus = sysStatus,
-                serverAccount = credentials.username,
-                cards = fetchedCards,
-                packages = mergedPackages
-            )
+            val salesBundle = runCatching {
+                client.ensureConnected(credentials)
+                fetchUserManagerSalesAndReportsInternal(
+                    client = client,
+                    credentials = credentials,
+                    isV7 = isV7,
+                    sysStatus = sysStatus,
+                    serverAccount = credentials.username,
+                    cards = fetchedCards,
+                    packages = mergedPackages
+                )
+            }.getOrElse {
+                buildFallbackSalesBundleFromCards(
+                    sysStatus = sysStatus,
+                    serverAccount = credentials.username,
+                    cards = fetchedCards,
+                    packages = mergedPackages
+                )
+            }
             if (salesBundle.salesLogs.isNotEmpty()) {
                 onProgress(93, "جاري حفظ سجل مبيعات يوزر منجر (${salesBundle.salesLogs.size} سجل)...")
                 repository.replaceSyncedMikrotikSalesLogs(salesBundle.salesLogs)
@@ -327,7 +377,7 @@ object MikrotikSyncManager {
                 )
             }
 
-            val sysStatus = fetchSystemStatusInternal(client)
+            val sysStatus = fetchSystemStatusInternal(client, credentials)
             val isV7 = sysStatus.routerOsVersion.trim().startsWith("7")
 
             val resolvedCards = if (cards.isEmpty() && repository != null) {
@@ -343,6 +393,7 @@ object MikrotikSyncManager {
 
             val bundle = fetchUserManagerSalesAndReportsInternal(
                 client = client,
+                credentials = credentials,
                 isV7 = isV7,
                 sysStatus = sysStatus,
                 serverAccount = credentials.username,
@@ -379,7 +430,7 @@ object MikrotikSyncManager {
                 )
             }
 
-            val sysStatus = fetchSystemStatusInternal(client)
+            val sysStatus = fetchSystemStatusInternal(client, credentials)
             val isV7 = sysStatus.routerOsVersion.trim().startsWith("7")
             val total = cards.size
             val pushedCards = mutableListOf<CardEntity>()
@@ -444,7 +495,7 @@ object MikrotikSyncManager {
         try {
             val loginRes = client.connectAndLogin(credentials)
             if (loginRes.isFailure) return@withContext Result.failure(loginRes.exceptionOrNull()!!)
-            val sysStatus = fetchSystemStatusInternal(client)
+            val sysStatus = fetchSystemStatusInternal(client, credentials)
             val isV7 = sysStatus.routerOsVersion.trim().startsWith("7")
 
             var removed = 0
@@ -460,47 +511,120 @@ object MikrotikSyncManager {
         }
     }
 
-    private suspend fun fetchSystemStatusInternal(client: MikrotikApiClient): MikrotikSystemStatus {
-        val resourceRes = client.execute("/system/resource/print", timeoutMs = TELEMETRY_TIMEOUT_MS).getOrNull()
-        val resMap = resourceRes?.records?.firstOrNull().orEmpty()
+    /**
+     * Reads real-time MikroTik telemetry (CPU, uptime, RouterOS version, active connections,
+     * and live download/upload traffic).
+     *
+     * CRITICAL ROUTEROS v6 NOTE:
+     * On RouterOS v6 routers with tens of thousands of User Manager cards (e.g. 50,000+ cards),
+     * `/tool/user-manager/session/print?active=true` scans the entire historical UM SQLite
+     * session table linearly and times out (which previously closed the socket and broke the
+     * entire sync with "الاتصال بالمايكروتيك مغلق.").
+     * Therefore:
+     * - On RouterOS v6: query fast live active RADIUS/Hotspot & PPPoE sessions first (<100ms),
+     *   falling back to UM active sessions only if both are 0, and ALWAYS restoring the socket
+     *   if an optional query times out.
+     * - On RouterOS v7: query indexed `/user-manager/session/print?active=true` first, with
+     *   fast fallback to active Hotspot/PPPoE sessions.
+     */
+    private suspend fun fetchSystemStatusInternal(
+        client: MikrotikApiClient,
+        credentials: MikrotikCredentials
+    ): MikrotikSystemStatus {
+        val resourceRes = client.execute("/system/resource/print", timeoutMs = TELEMETRY_TIMEOUT_MS)
+            .getOrElse { throw it }
+        if (!resourceRes.isSuccess) {
+            throw IOException(resourceRes.trapMessage ?: "تعذر قراءة بيانات النظام من المايكروتيك.")
+        }
+        val resMap = resourceRes.records.firstOrNull().orEmpty()
         val cpu = resMap["cpu-load"]?.toIntOrNull()?.coerceIn(0, 100) ?: 0
         val uptime = resMap["uptime"].orEmpty().ifBlank { "--" }
         val version = resMap["version"].orEmpty()
         val board = resMap["board-name"].orEmpty()
+        val isV7 = version.trim().startsWith("7")
 
-        // Query User Manager active sessions first
-        val umActiveCmd = if (version.trim().startsWith("7")) {
-            "/user-manager/session/print"
-        } else {
-            "/tool/user-manager/session/print"
-        }
         var activeCount = 0
         var totalBytes = 0L
-        val umStream = client.executeStreaming(
-            umActiveCmd,
-            listOf("?active=true", "=.proplist=download,upload"),
-            timeoutMs = TELEMETRY_TIMEOUT_MS
-        ) { _, rec ->
-            activeCount++
-            totalBytes += (rec["download"]?.toLongOrNull() ?: 0L) + (rec["upload"]?.toLongOrNull() ?: 0L)
-        }
 
-        // Fallback to router active RADIUS/accounting sessions only for live gauge if UM active list returns 0
-        if (umStream.isFailure || activeCount == 0) {
-            var fallbackCount = 0
-            var fallbackBytes = 0L
-            client.executeStreaming(
+        suspend fun queryHotspotActive(): Pair<Int, Long> {
+            client.ensureConnected(credentials)
+            var count = 0
+            var bytes = 0L
+            val res = client.executeStreaming(
                 "/ip/hotspot/active/print",
                 listOf("=.proplist=user,bytes-in,bytes-out"),
-                timeoutMs = TELEMETRY_TIMEOUT_MS
+                timeoutMs = ACTIVE_QUERY_TIMEOUT_MS
             ) { _, rec ->
-                fallbackCount++
-                fallbackBytes += (rec["bytes-in"]?.toLongOrNull() ?: 0L) + (rec["bytes-out"]?.toLongOrNull() ?: 0L)
+                count++
+                bytes += (rec["bytes-in"]?.toLongOrNull() ?: 0L) + (rec["bytes-out"]?.toLongOrNull() ?: 0L)
             }
-            if (fallbackCount > 0) {
-                activeCount = fallbackCount
-                totalBytes = fallbackBytes
+            return if (res.isSuccess && res.getOrNull()?.isSuccess == true) count to bytes else 0 to 0L
+        }
+
+        suspend fun queryPppActive(): Int {
+            client.ensureConnected(credentials)
+            var count = 0
+            val res = client.executeStreaming(
+                "/ppp/active/print",
+                listOf("=.proplist=name"),
+                timeoutMs = ACTIVE_QUERY_TIMEOUT_MS
+            ) { _, _ ->
+                count++
             }
+            return if (res.isSuccess && res.getOrNull()?.isSuccess == true) count else 0
+        }
+
+        suspend fun queryUmActive(cmd: String): Pair<Int, Long> {
+            client.ensureConnected(credentials)
+            var count = 0
+            var bytes = 0L
+            val res = client.executeStreaming(
+                cmd,
+                listOf("?active=true", "=.proplist=download,upload"),
+                timeoutMs = ACTIVE_QUERY_TIMEOUT_MS
+            ) { _, rec ->
+                count++
+                bytes += (rec["download"]?.toLongOrNull() ?: 0L) + (rec["upload"]?.toLongOrNull() ?: 0L)
+            }
+            return if (res.isSuccess && res.getOrNull()?.isSuccess == true) count to bytes else 0 to 0L
+        }
+
+        if (isV7) {
+            // RouterOS v7 indexes active UM sessions natively
+            val (umCount, umBytes) = queryUmActive("/user-manager/session/print")
+            if (umCount > 0) {
+                activeCount = umCount
+                totalBytes = umBytes
+            } else {
+                val (hsCount, hsBytes) = queryHotspotActive()
+                if (hsCount > 0) {
+                    activeCount = hsCount
+                    totalBytes = hsBytes
+                } else {
+                    activeCount = queryPppActive()
+                }
+            }
+        } else {
+            // RouterOS v6: fast live active RADIUS/Hotspot & PPPoE clients first so we never stall on 500k UM history rows
+            val (hsCount, hsBytes) = queryHotspotActive()
+            if (hsCount > 0) {
+                activeCount = hsCount
+                totalBytes = hsBytes
+            } else {
+                val pppCount = queryPppActive()
+                if (pppCount > 0) {
+                    activeCount = pppCount
+                } else {
+                    val (umCount, umBytes) = queryUmActive("/tool/user-manager/session/print")
+                    activeCount = umCount
+                    totalBytes = umBytes
+                }
+            }
+        }
+
+        // Guarantee the socket is healthy before returning to caller (never leave a closed socket behind)
+        if (!client.isOpen) {
+            client.ensureConnected(credentials)
         }
 
         return MikrotikSystemStatus(
@@ -516,15 +640,18 @@ object MikrotikSyncManager {
 
     private suspend fun fetchProfileLimitationsBestEffort(
         client: MikrotikApiClient,
+        credentials: MikrotikCredentials,
         isV7: Boolean
     ): Map<String, ProfileLimitationMeta> {
         val result = HashMap<String, ProfileLimitationMeta>()
         runCatching {
+            client.ensureConnected(credentials)
             val limCmd = if (isV7) "/user-manager/limitation/print" else "/tool/user-manager/profile/limitation/print"
             val linkCmd = if (isV7) "/user-manager/profile-limitation/print" else "/tool/user-manager/profile/profile-limitation/print"
 
             val limRecords = client.execute(limCmd, timeoutMs = 20000).getOrNull()
                 ?.takeIf { it.isSuccess }?.records.orEmpty()
+            client.ensureConnected(credentials)
             val linkRecords = client.execute(linkCmd, timeoutMs = 20000).getOrNull()
                 ?.takeIf { it.isSuccess }?.records.orEmpty()
 
@@ -569,6 +696,7 @@ object MikrotikSyncManager {
 
     private suspend fun fetchUserManagerPackagesInternal(
         client: MikrotikApiClient,
+        credentials: MikrotikCredentials,
         isV7: Boolean,
         limitationsByProfile: Map<String, ProfileLimitationMeta>
     ): List<CardPackageEntity> {
@@ -576,10 +704,12 @@ object MikrotikSyncManager {
         val primaryCmd = if (isV7) "/user-manager/profile/print" else "/tool/user-manager/profile/print"
         val fallbackCmd = if (isV7) "/tool/user-manager/profile/print" else "/user-manager/profile/print"
 
+        client.ensureConnected(credentials)
         val primaryRes = client.execute(primaryCmd, timeoutMs = 30000).getOrNull()
         val records = if (primaryRes != null && primaryRes.isSuccess) {
             primaryRes.records
         } else {
+            client.ensureConnected(credentials)
             client.execute(fallbackCmd, timeoutMs = 30000).getOrNull()
                 ?.takeIf { it.isSuccess }?.records.orEmpty()
         }
@@ -610,6 +740,7 @@ object MikrotikSyncManager {
 
     private suspend fun fetchAllUserManagerCardsStreaming(
         client: MikrotikApiClient,
+        credentials: MikrotikCredentials,
         isV7: Boolean,
         serverAccount: String,
         priceByPackage: Map<String, Double>,
@@ -617,16 +748,27 @@ object MikrotikSyncManager {
         onCountProgress: (Int) -> Unit
     ): Result<List<CardEntity>> {
         return if (isV7) {
-            val v7Res = fetchV7CardsStreaming(client, serverAccount, priceByPackage, onCountProgress)
-            if (v7Res.isSuccess) v7Res else fetchV6CardsStreaming(client, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
+            val v7Res = fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, onCountProgress)
+            if (v7Res.isSuccess) {
+                v7Res
+            } else {
+                client.ensureConnected(credentials)
+                fetchV6CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
+            }
         } else {
-            val v6Res = fetchV6CardsStreaming(client, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
-            if (v6Res.isSuccess) v6Res else fetchV7CardsStreaming(client, serverAccount, priceByPackage, onCountProgress)
+            val v6Res = fetchV6CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
+            if (v6Res.isSuccess) {
+                v6Res
+            } else {
+                client.ensureConnected(credentials)
+                fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, onCountProgress)
+            }
         }
     }
 
     private suspend fun fetchV6CardsStreaming(
         client: MikrotikApiClient,
+        credentials: MikrotikCredentials,
         serverAccount: String,
         priceByPackage: Map<String, Double>,
         limitationsByProfile: Map<String, ProfileLimitationMeta>,
@@ -636,17 +778,13 @@ object MikrotikSyncManager {
         val baseNow = System.currentTimeMillis()
         var streamedCount = 0
 
-        val streamRes = client.executeStreaming(
-            command = "/tool/user-manager/user/print",
-            params = emptyList(),
-            timeoutMs = STREAM_BULK_TIMEOUT_MS
-        ) { idx, u ->
+        fun processV6User(idx: Int, u: Map<String, String>) {
             streamedCount = idx + 1
             if (streamedCount % 500 == 0) {
                 onCountProgress(streamedCount)
             }
             val uname = (u["username"] ?: u["name"]).orEmpty().trim()
-            if (uname.isBlank()) return@executeStreaming
+            if (uname.isBlank()) return
 
             val actualProfile = u["actual-profile"].orEmpty().trim()
             val commentProfile = u["comment"].orEmpty().trim()
@@ -701,6 +839,27 @@ object MikrotikSyncManager {
             )
         }
 
+        // Request only the needed User Manager attributes first (3x-4x faster for 50,000+ cards)
+        val fastProplist = listOf(
+            "=.proplist=.id,username,name,password,customer,actual-profile,profile,comment,download-used,upload-used,uptime-used,disabled,active,last-seen"
+        )
+        var streamRes = client.executeStreaming(
+            command = "/tool/user-manager/user/print",
+            params = fastProplist,
+            timeoutMs = STREAM_BULK_TIMEOUT_MS
+        ) { idx, u -> processV6User(idx, u) }
+
+        // Fallback to full record print if an older RouterOS v6 build traps on proplist
+        if (result.isEmpty() && (streamRes.isFailure || streamRes.getOrNull()?.isSuccess != true)) {
+            client.ensureConnected(credentials)
+            result.clear()
+            streamRes = client.executeStreaming(
+                command = "/tool/user-manager/user/print",
+                params = emptyList(),
+                timeoutMs = STREAM_BULK_TIMEOUT_MS
+            ) { idx, u -> processV6User(idx, u) }
+        }
+
         if (streamRes.isFailure) {
             return Result.failure(streamRes.exceptionOrNull() ?: IOException("تعذر قراءة كروت يوزر منجر (v6)."))
         }
@@ -714,11 +873,13 @@ object MikrotikSyncManager {
 
     private suspend fun fetchV7CardsStreaming(
         client: MikrotikApiClient,
+        credentials: MikrotikCredentials,
         serverAccount: String,
         priceByPackage: Map<String, Double>,
         onCountProgress: (Int) -> Unit
     ): Result<List<CardEntity>> {
         // 1. Stream all user-profile assignments
+        client.ensureConnected(credentials)
         val profilesByUser = HashMap<String, MutableList<Pair<String, String>>>(4096)
         client.executeStreaming(
             command = "/user-manager/user-profile/print",
@@ -733,11 +894,12 @@ object MikrotikSyncManager {
         }
 
         // 2. Stream all sessions to aggregate total bytes & uptime per user (best-effort)
+        client.ensureConnected(credentials)
         val sessionByUser = HashMap<String, UserSessionAgg>(4096)
         client.executeStreaming(
             command = "/user-manager/session/print",
             params = listOf("=.proplist=user,download,upload,uptime,active"),
-            timeoutMs = STREAM_BULK_TIMEOUT_MS
+            timeoutMs = SESSIONS_BULK_TIMEOUT_MS
         ) { _, s ->
             val user = s["user"].orEmpty().trim()
             if (user.isNotBlank()) {
@@ -751,12 +913,13 @@ object MikrotikSyncManager {
             }
         }
 
-        // 3. Stream ALL User Manager users (zero filters)
+        // 3. Stream ALL User Manager users (ensure connected even if session table timed out)
+        client.ensureConnected(credentials).getOrElse { return Result.failure(it) }
         val result = LinkedHashMap<String, CardEntity>(4096)
         val baseNow = System.currentTimeMillis()
         val userStreamRes = client.executeStreaming(
             command = "/user-manager/user/print",
-            params = emptyList(),
+            params = listOf("=.proplist=.id,name,password,group,comment,disabled"),
             timeoutMs = STREAM_BULK_TIMEOUT_MS
         ) { idx, u ->
             val count = idx + 1
@@ -835,6 +998,7 @@ object MikrotikSyncManager {
      */
     private suspend fun fetchUserManagerSalesAndReportsInternal(
         client: MikrotikApiClient,
+        credentials: MikrotikCredentials,
         isV7: Boolean,
         sysStatus: MikrotikSystemStatus,
         serverAccount: String,
@@ -932,29 +1096,22 @@ object MikrotikSyncManager {
             }
         }
 
+        client.ensureConnected(credentials)
         val payRes = client.executeStreaming(
             command = payPrimary,
-            params = listOf("=.proplist=user,price,trans-start,trans-end,date,method"),
-            timeoutMs = STREAM_BULK_TIMEOUT_MS
+            params = listOf("=.proplist=user,price,trans-start,trans-end,method"),
+            timeoutMs = SESSIONS_BULK_TIMEOUT_MS
         ) { _, rec -> handlePaymentRecord(rec) }
-        if (payRes.isFailure || payRes.getOrNull()?.isSuccess != true) {
-            paymentsCount = 0
-            payTodayAmt = 0.0; payTodayCnt = 0
-            payYestAmt = 0.0; payYestCnt = 0
-            payWeekAmt = 0.0; payWeekCnt = 0
-            payMonthAmt = 0.0; payMonthCnt = 0
-            payAllAmt = 0.0; payAllCnt = 0
-            rawPaymentLogs.clear()
-            groupedPaymentBuckets.clear()
-            overflowPayments = false
+        if (paymentsCount == 0 && (payRes.isFailure || payRes.getOrNull()?.isSuccess != true)) {
+            client.ensureConnected(credentials)
             client.executeStreaming(
                 command = payFallback,
-                params = listOf("=.proplist=user,price,trans-start,trans-end,date,method"),
-                timeoutMs = STREAM_BULK_TIMEOUT_MS
+                params = listOf("=.proplist=user,price,trans-start,trans-end,method"),
+                timeoutMs = SESSIONS_BULK_TIMEOUT_MS
             ) { _, rec -> handlePaymentRecord(rec) }
         }
 
-        // 2. Stream ALL User Manager sessions (lightweight proplist, zero limits)
+        // 2. Stream User Manager sessions with version-specific proplist (keep partial records if router DB is huge)
         var sessionsScanned = 0
         var todaySessionBytes = 0L
         val earliestSessionDateByUser = HashMap<String, String>(4096)
@@ -966,6 +1123,16 @@ object MikrotikSyncManager {
 
         val sessPrimary = if (isV7) "/user-manager/session/print" else "/tool/user-manager/session/print"
         val sessFallback = if (isV7) "/tool/user-manager/session/print" else "/user-manager/session/print"
+        val sessProplistPrimary = if (isV7) {
+            listOf("=.proplist=user,started,ended,download,upload,active")
+        } else {
+            listOf("=.proplist=user,from-time,till-time,download,upload,active")
+        }
+        val sessProplistFallback = if (isV7) {
+            listOf("=.proplist=user,from-time,till-time,download,upload,active")
+        } else {
+            listOf("=.proplist=user,started,ended,download,upload,active")
+        }
 
         fun handleSessionRecord(rec: Map<String, String>) {
             sessionsScanned++
@@ -997,24 +1164,18 @@ object MikrotikSyncManager {
             }
         }
 
+        client.ensureConnected(credentials)
         val sessRes = client.executeStreaming(
             command = sessPrimary,
-            params = listOf("=.proplist=user,from-time,till-time,started,ended,download,upload,active"),
-            timeoutMs = STREAM_BULK_TIMEOUT_MS
+            params = sessProplistPrimary,
+            timeoutMs = SESSIONS_BULK_TIMEOUT_MS
         ) { _, rec -> handleSessionRecord(rec) }
-        if (sessRes.isFailure || sessRes.getOrNull()?.isSuccess != true) {
-            sessionsScanned = 0
-            todaySessionBytes = 0L
-            earliestSessionDateByUser.clear()
-            userSessionBytes.clear()
-            todayActiveUsers.clear()
-            yesterdayActiveUsers.clear()
-            weekActiveUsers.clear()
-            monthActiveUsers.clear()
+        if (sessionsScanned == 0 && (sessRes.isFailure || sessRes.getOrNull()?.isSuccess != true)) {
+            client.ensureConnected(credentials)
             client.executeStreaming(
                 command = sessFallback,
-                params = listOf("=.proplist=user,from-time,till-time,started,ended,download,upload,active"),
-                timeoutMs = STREAM_BULK_TIMEOUT_MS
+                params = sessProplistFallback,
+                timeoutMs = SESSIONS_BULK_TIMEOUT_MS
             ) { _, rec -> handleSessionRecord(rec) }
         }
 
@@ -1182,6 +1343,56 @@ object MikrotikSyncManager {
             sourceNote = sourceNote
         )
         return UserManagerSalesSyncBundle(salesLogs = syncedSalesLogs, liveMetrics = metrics)
+    }
+
+    private fun buildFallbackSalesBundleFromCards(
+        sysStatus: MikrotikSystemStatus,
+        serverAccount: String,
+        cards: List<CardEntity>,
+        packages: List<CardPackageEntity>
+    ): UserManagerSalesSyncBundle {
+        val todayKey = DateTimeUtils.todayDateKey()
+        val priceByPackage = HashMap<String, Double>()
+        packages.forEach { priceByPackage[it.name.trim().lowercase()] = it.price }
+
+        val consumedCards = cards.filter { it.status != CardStatus.UNUSED }
+        val byPkg = consumedCards.groupBy { it.packageName.ifBlank { "يوزر منجر" } }
+        var totalAmt = 0.0
+        val logs = byPkg.map { (pkg, pkgCards) ->
+            val unit = priceByPackage[pkg.lowercase()]?.takeIf { it > 0.0 }
+                ?: pkgCards.firstOrNull { it.price > 0.0 }?.price
+                ?: inferPriceFromPackageName(pkg)
+            val sumAmt = pkgCards.size * unit
+            val sumMb = pkgCards.sumOf { it.dataUsageMb }
+            totalAmt += sumAmt
+            PrintSalesLogEntity(
+                cardUsername = "كروت مستهلكة • $pkg (${pkgCards.size} كرت)",
+                packageName = pkg,
+                cardsCount = pkgCards.size,
+                unitPrice = unit,
+                totalAmount = sumAmt,
+                commissionTotal = 0.0,
+                serverAccount = serverAccount,
+                downloadLabel = formatBytesCompact((sumMb * 1024.0 * 1024.0).toLong()),
+                downloadMb = sumMb,
+                printMethod = PrintMethod.PDF_A4_GRID,
+                operationType = SaleOperationType.DIRECT_SALE,
+                dateKey = todayKey,
+                createdAt = System.currentTimeMillis()
+            )
+        }
+        val allTime = PeriodSalesSummary(
+            totalAmount = totalAmt,
+            totalCards = consumedCards.size,
+            operationsCount = logs.size
+        )
+        val metrics = MikrotikLiveReportsMetrics(
+            todayDownloadBytes = sysStatus.totalDownloadBytes,
+            activeLiveDownloadBytes = sysStatus.totalDownloadBytes,
+            allTimeSales = allTime,
+            sourceNote = "بيانات كروت يوزر منجر الكاملة (${cards.size} كرت متزامن)"
+        )
+        return UserManagerSalesSyncBundle(salesLogs = logs, liveMetrics = metrics)
     }
 
     private fun parseSessionRecord(

@@ -83,7 +83,7 @@ fun ExpiredCardsScreen(
                 trailingAction = {
                     IconButton(
                         onClick = viewModel::syncFromMikrotik,
-                        enabled = !state.isSyncing && state.isConnectedToMikrotik
+                        enabled = !state.isSyncing
                     ) {
                         if (state.isSyncing) {
                             CircularProgressIndicator(

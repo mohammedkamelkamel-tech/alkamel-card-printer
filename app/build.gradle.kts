@@ -83,5 +83,6 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.zxing.core)
 
+    testImplementation(libs.junit)
     debugImplementation(libs.androidx.ui.tooling)
 }

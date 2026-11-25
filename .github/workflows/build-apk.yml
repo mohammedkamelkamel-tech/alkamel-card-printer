@@ -49,6 +49,9 @@ jobs:
           gradle-version: '8.9'
           cache-read-only: false
 
+      - name: Run Unit & RouterOS Protocol Tests
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace --console=plain --max-workers=4
+
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=4
 

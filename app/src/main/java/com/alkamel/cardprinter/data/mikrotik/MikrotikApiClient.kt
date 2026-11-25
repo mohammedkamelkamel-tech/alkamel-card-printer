@@ -7,9 +7,12 @@ import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.IOException
+import java.net.ConnectException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.security.MessageDigest
 
 data class RouterOsSentence(
@@ -36,24 +39,55 @@ data class RouterOsStreamResult(
 /**
  * Native pure-Kotlin MikroTik RouterOS Binary API Client (supports RouterOS v6 & v7,
  * including both modern plaintext /login and legacy MD5 challenge-response /login).
- * Supports both buffered and low-memory streaming execution for large User Manager tables
- * (50,000+ cards/sessions) with dynamic timeouts and safe resource cleanup.
+ *
+ * Features:
+ * - Persistent reusable socket with transparent auto-reconnect on idle drop / closed socket
+ * - Streaming record consumption for 50,000+ User Manager cards/sessions without RAM blowup
+ * - Clear Arabic diagnostic errors reflecting the actual transport or RouterOS failure
  */
 class MikrotikApiClient(
     private val connectTimeoutMs: Int = 8000,
     private val readTimeoutMs: Int = 20000
 ) : AutoCloseable {
 
+    @Volatile
     private var socket: Socket? = null
     private var input: BufferedInputStream? = null
     private var output: BufferedOutputStream? = null
 
+    @Volatile
+    private var lastCredentials: MikrotikCredentials? = null
+
     val isOpen: Boolean
-        get() = socket?.let { it.isConnected && !it.isClosed } == true
+        get() = socket?.let {
+            it.isConnected && !it.isClosed && !it.isInputShutdown && !it.isOutputShutdown
+        } == true
+
+    fun hasSameCredentials(credentials: MikrotikCredentials): Boolean {
+        val current = lastCredentials ?: return false
+        return current.host.trim().equals(credentials.host.trim(), ignoreCase = true) &&
+            current.port == credentials.port &&
+            current.username.trim() == credentials.username.trim() &&
+            current.password == credentials.password
+    }
 
     fun setReadTimeout(timeoutMs: Int) {
         val safeTimeout = timeoutMs.coerceIn(3000, 300000)
         runCatching { socket?.soTimeout = safeTimeout }
+    }
+
+    /**
+     * Ensures the socket is connected and authenticated.
+     * Reuses the active connection if already open with the same credentials,
+     * otherwise cleanly reconnects and logs in.
+     */
+    suspend fun ensureConnected(credentials: MikrotikCredentials? = null): Result<Unit> {
+        val target = credentials ?: lastCredentials
+            ?: return Result.failure(IOException("لا توجد بيانات اتصال محفوظة للمايكروتيك."))
+        if (isOpen && hasSameCredentials(target)) {
+            return Result.success(Unit)
+        }
+        return connectAndLogin(target)
     }
 
     suspend fun connectAndLogin(credentials: MikrotikCredentials): Result<Unit> = withContext(Dispatchers.IO) {
@@ -63,7 +97,15 @@ class MikrotikApiClient(
             if (cleanHost.isBlank()) {
                 return@withContext Result.failure(IllegalArgumentException("عنوان السيرفر (IP / Host) فارغ."))
             }
-            val cleanPort = credentials.port.coerceIn(1, 65535)
+            val cleanPort = credentials.port
+            if (cleanPort !in 1..65535) {
+                return@withContext Result.failure(IllegalArgumentException("رقم منفذ API غير صالح ($cleanPort)."))
+            }
+            val cleanUser = credentials.username.trim()
+            if (cleanUser.isBlank()) {
+                return@withContext Result.failure(IllegalArgumentException("اسم المستخدم للمايكروتيك فارغ."))
+            }
+
             val newSocket = Socket()
             runCatching {
                 newSocket.tcpNoDelay = true
@@ -81,7 +123,7 @@ class MikrotikApiClient(
             val firstRes = executeInternal(
                 listOf(
                     "/login",
-                    "=name=${credentials.username.trim()}",
+                    "=name=$cleanUser",
                     "=password=${credentials.password}"
                 )
             )
@@ -99,7 +141,7 @@ class MikrotikApiClient(
                 val secondRes = executeInternal(
                     listOf(
                         "/login",
-                        "=name=${credentials.username.trim()}",
+                        "=name=$cleanUser",
                         "=response=00$md5Response"
                     )
                 )
@@ -111,80 +153,147 @@ class MikrotikApiClient(
                 }
             }
 
+            lastCredentials = credentials.copy(
+                host = cleanHost,
+                port = cleanPort,
+                username = cleanUser
+            )
             Result.success(Unit)
         } catch (e: Exception) {
             close()
-            val readable = when (e) {
-                is SocketTimeoutException -> "انتهت مهلة الاتصال بالمايكروتيك (${credentials.host}:${credentials.port}). تأكد من أن الهاتف على نفس الشبكة وأن خدمة API مفعلة."
-                is java.net.ConnectException -> "تعذر الوصول إلى المايكروتيك (${credentials.host}:${credentials.port}). تأكد من العنوان والمنفذ وتفعيل IP -> Services -> api."
-                is java.net.UnknownHostException -> "عنوان السيرفر غير معروف (${credentials.host})."
-                else -> e.localizedMessage ?: "تعذر الاتصال بسيرفر المايكروتيك."
-            }
-            Result.failure(IOException(readable, e))
+            Result.failure(IOException(formatTransportError(e, credentials), e))
         }
     }
 
     suspend fun execute(
         command: String,
         params: List<String> = emptyList(),
-        timeoutMs: Int? = null
+        timeoutMs: Int? = null,
+        autoReconnect: Boolean = true
     ): Result<RouterOsCommandResult> = withContext(Dispatchers.IO) {
-        val previousTimeout = runCatching { socket?.soTimeout }.getOrNull()
-        try {
+        val words = ArrayList<String>(1 + params.size).apply {
+            add(command)
+            addAll(params)
+        }
+        val maxAttempts = if (autoReconnect && lastCredentials != null) 2 else 1
+
+        for (attempt in 1..maxAttempts) {
             if (!isOpen) {
-                return@withContext Result.failure(IOException("الاتصال بالمايكروتيك مغلق."))
+                val creds = lastCredentials
+                if (autoReconnect && creds != null) {
+                    val recon = connectAndLogin(creds)
+                    if (recon.isFailure) {
+                        return@withContext Result.failure(
+                            recon.exceptionOrNull() ?: IOException("تعذر إعادة الاتصال بالمايكروتيك.")
+                        )
+                    }
+                } else {
+                    return@withContext Result.failure(
+                        IOException("لا يوجد اتصال مفتوح بالمايكروتيك لتنفيذ ($command).")
+                    )
+                }
             }
-            if (timeoutMs != null) {
-                setReadTimeout(timeoutMs)
-            }
-            val words = ArrayList<String>(1 + params.size).apply {
-                add(command)
-                addAll(params)
-            }
-            Result.success(executeInternal(words))
-        } catch (e: SocketTimeoutException) {
-            close()
-            Result.failure(IOException("انتهت مهلة قراءة البيانات من المايكروتيك أثناء تنفيذ ($command). قد تكون البيانات كبيرة جداً أو الشبكة بطيئة.", e))
-        } catch (e: Exception) {
-            Result.failure(e)
-        } finally {
-            if (timeoutMs != null && previousTimeout != null && isOpen) {
-                runCatching { socket?.soTimeout = previousTimeout }
+
+            val previousTimeout = runCatching { socket?.soTimeout }.getOrNull()
+            try {
+                if (timeoutMs != null) {
+                    setReadTimeout(timeoutMs)
+                }
+                return@withContext Result.success(executeInternal(words))
+            } catch (e: SocketTimeoutException) {
+                close()
+                return@withContext Result.failure(
+                    IOException(
+                        "انتهت مهلة قراءة البيانات من المايكروتيك أثناء تنفيذ ($command). قد تكون البيانات كبيرة أو الشبكة بطيئة.",
+                        e
+                    )
+                )
+            } catch (e: Exception) {
+                val isRecoverableDrop = e is EOFException || e is SocketException
+                close()
+                if (isRecoverableDrop && attempt < maxAttempts) {
+                    continue
+                }
+                val readable = lastCredentials?.let { formatTransportError(e, it) }
+                    ?: (e.localizedMessage ?: "انقطع الاتصال بالمايكروتيك أثناء تنفيذ ($command).")
+                return@withContext Result.failure(IOException(readable, e))
+            } finally {
+                if (timeoutMs != null && previousTimeout != null && isOpen) {
+                    runCatching { socket?.soTimeout = previousTimeout }
+                }
             }
         }
+        Result.failure(IOException("تعذر تنفيذ الأمر ($command) على المايكروتيك."))
     }
 
     /**
      * Streams every `!re` record directly to [onRecord] until `!done` is received,
      * ensuring 100% of records are consumed without holding tens of thousands of raw maps in RAM.
+     * Automatically reconnects if the socket was closed or dropped before streaming started.
      */
     suspend fun executeStreaming(
         command: String,
         params: List<String> = emptyList(),
         timeoutMs: Int = 120_000,
+        autoReconnect: Boolean = true,
         onRecord: (index: Int, record: Map<String, String>) -> Unit
     ): Result<RouterOsStreamResult> = withContext(Dispatchers.IO) {
-        val previousTimeout = runCatching { socket?.soTimeout }.getOrNull()
-        try {
+        val words = ArrayList<String>(1 + params.size).apply {
+            add(command)
+            addAll(params)
+        }
+        val maxAttempts = if (autoReconnect && lastCredentials != null) 2 else 1
+
+        for (attempt in 1..maxAttempts) {
             if (!isOpen) {
-                return@withContext Result.failure(IOException("الاتصال بالمايكروتيك مغلق."))
+                val creds = lastCredentials
+                if (autoReconnect && creds != null) {
+                    val recon = connectAndLogin(creds)
+                    if (recon.isFailure) {
+                        return@withContext Result.failure(
+                            recon.exceptionOrNull() ?: IOException("تعذر إعادة الاتصال بالمايكروتيك.")
+                        )
+                    }
+                } else {
+                    return@withContext Result.failure(
+                        IOException("لا يوجد اتصال مفتوح بالمايكروتيك لتنفيذ ($command).")
+                    )
+                }
             }
-            setReadTimeout(timeoutMs)
-            val words = ArrayList<String>(1 + params.size).apply {
-                add(command)
-                addAll(params)
-            }
-            Result.success(executeStreamingInternal(words, onRecord))
-        } catch (e: SocketTimeoutException) {
-            close()
-            Result.failure(IOException("انتهت مهلة جلب القائمة الكاملة من المايكروتيك ($command). أعد المحاولة عند استقرار الاتصال.", e))
-        } catch (e: Exception) {
-            Result.failure(e)
-        } finally {
-            if (previousTimeout != null && isOpen) {
-                runCatching { socket?.soTimeout = previousTimeout }
+
+            val previousTimeout = runCatching { socket?.soTimeout }.getOrNull()
+            var emittedAny = false
+            try {
+                setReadTimeout(timeoutMs)
+                val result = executeStreamingInternal(words) { idx, rec ->
+                    emittedAny = true
+                    onRecord(idx, rec)
+                }
+                return@withContext Result.success(result)
+            } catch (e: SocketTimeoutException) {
+                close()
+                return@withContext Result.failure(
+                    IOException(
+                        "انتهت مهلة جلب البيانات من المايكروتيك ($command). أعد المحاولة عند استقرار الشبكة.",
+                        e
+                    )
+                )
+            } catch (e: Exception) {
+                val isRecoverableDrop = !emittedAny && (e is EOFException || e is SocketException)
+                close()
+                if (isRecoverableDrop && attempt < maxAttempts) {
+                    continue
+                }
+                val readable = lastCredentials?.let { formatTransportError(e, it) }
+                    ?: (e.localizedMessage ?: "انقطع الاتصال بالمايكروتيك أثناء قراءة ($command).")
+                return@withContext Result.failure(IOException(readable, e))
+            } finally {
+                if (previousTimeout != null && isOpen) {
+                    runCatching { socket?.soTimeout = previousTimeout }
+                }
             }
         }
+        Result.failure(IOException("تعذر قراءة البيانات من المايكروتيك ($command)."))
     }
 
     private fun executeInternal(words: List<String>): RouterOsCommandResult {
@@ -203,7 +312,7 @@ class MikrotikApiClient(
         words: List<String>,
         onRecord: (index: Int, record: Map<String, String>) -> Unit
     ): RouterOsStreamResult {
-        val out = output ?: throw IOException("قناة الإرسال غير متصلة")
+        val out = output ?: throw SocketException("قناة الإرسال غير متصلة")
         for (word in words) {
             writeWord(out, word)
         }
@@ -380,6 +489,24 @@ class MikrotikApiClient(
         val len = clean.length / 2
         return ByteArray(len) { i ->
             clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    private fun formatTransportError(e: Exception, credentials: MikrotikCredentials): String {
+        val endpoint = "${credentials.host.trim()}:${credentials.port}"
+        return when (e) {
+            is SocketTimeoutException ->
+                "انتهت مهلة الاتصال بالمايكروتيك ($endpoint). تأكد من أن الهاتف على نفس الشبكة وأن خدمة API مفعلة."
+            is ConnectException ->
+                "تعذر الوصول إلى المايكروتيك ($endpoint). تأكد من عنوان IP والمنفذ وتفعيل IP -> Services -> api."
+            is UnknownHostException ->
+                "عنوان السيرفر غير معروف (${credentials.host.trim()})."
+            is EOFException ->
+                "انقطع الاتصال مع المايكروتيك ($endpoint) أثناء استلام البيانات."
+            is SocketException ->
+                "تعذر استمرار الاتصال الشبكي مع المايكروتيك ($endpoint): ${e.localizedMessage ?: "انقطع الاتصال"}"
+            else ->
+                e.localizedMessage ?: "تعذر الاتصال بسيرفر المايكروتيك ($endpoint)."
         }
     }
 

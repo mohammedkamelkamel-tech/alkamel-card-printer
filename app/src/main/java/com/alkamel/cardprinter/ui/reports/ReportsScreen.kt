@@ -86,7 +86,7 @@ fun ReportsScreen(
                 trailingAction = {
                     IconButton(
                         onClick = viewModel::refreshFromMikrotik,
-                        enabled = !state.isRefreshingMikrotik && state.isConnectedToMikrotik
+                        enabled = !state.isRefreshingMikrotik
                     ) {
                         if (state.isRefreshingMikrotik) {
                             CircularProgressIndicator(

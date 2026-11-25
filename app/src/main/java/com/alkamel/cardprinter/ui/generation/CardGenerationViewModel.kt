@@ -171,7 +171,7 @@ class CardGenerationViewModel(
             return
         }
         val session = LocalSessionHolder.activeSession.value
-        if (session == null || !session.isConnectedToMikrotik || session.hostAddress.isBlank()) {
+        if (session == null || !session.hasConfiguredRouter) {
             _uiState.update {
                 it.copy(
                     errorMessage = "غير متصل بسيرفر المايكروتيك. يرجى الربط الفعلي بالمايكروتيك أولاً لإضافة الكروت إلى السيرفر."
@@ -214,6 +214,7 @@ class CardGenerationViewModel(
             )
 
             pushResult.onSuccess { pushed ->
+                LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
                 val pushedUsernames = pushed.map { it.username }.toSet()
                 val persistedCards = repository.getAllCardsOnce()
                     .filter { it.username in pushedUsernames }

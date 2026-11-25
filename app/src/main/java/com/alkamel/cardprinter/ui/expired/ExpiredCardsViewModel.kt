@@ -62,7 +62,7 @@ class ExpiredCardsViewModel(
 
     fun syncFromMikrotik() {
         val session = LocalSessionHolder.activeSession.value
-        if (session == null || session.hostAddress.isBlank()) {
+        if (session == null || !session.hasConfiguredRouter) {
             _uiState.update { it.copy(errorMessage = "لا يوجد اتصال فعلي بسيرفر يوزر منجر.") }
             return
         }
@@ -73,7 +73,10 @@ class ExpiredCardsViewModel(
                 credentials = session.toCredentials(),
                 loadType = session.loadType,
                 repository = repository,
-                onProgress = { _, _ -> }
+                onProgress = { _, _ -> },
+                onSystemStatusReady = { liveStatus ->
+                    LocalSessionHolder.updateConnectionStatus(true, liveStatus, null)
+                }
             ).onSuccess { summary ->
                 LocalSessionHolder.updateConnectionStatus(true, summary.systemStatus, null)
                 LocalSessionHolder.updateLiveReportsMetrics(summary.liveReportsMetrics)
@@ -97,12 +100,15 @@ class ExpiredCardsViewModel(
     fun deleteSingleCard(card: CardEntity) {
         viewModelScope.launch {
             val session = LocalSessionHolder.activeSession.value
-            if (session != null && session.isConnectedToMikrotik) {
-                MikrotikSyncManager.deleteCardsOnMikrotik(
+            if (session != null && session.hasConfiguredRouter) {
+                val res = MikrotikSyncManager.deleteCardsOnMikrotik(
                     credentials = session.toCredentials(),
                     loadType = session.loadType,
                     cards = listOf(card)
                 )
+                if (res.isSuccess) {
+                    LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
+                }
             }
             repository.deleteCardsByIds(listOf(card.id))
                 .onSuccess {
@@ -128,12 +134,15 @@ class ExpiredCardsViewModel(
         if (targets.isEmpty()) return
         viewModelScope.launch {
             val session = LocalSessionHolder.activeSession.value
-            if (session != null && session.isConnectedToMikrotik) {
-                MikrotikSyncManager.deleteCardsOnMikrotik(
+            if (session != null && session.hasConfiguredRouter) {
+                val res = MikrotikSyncManager.deleteCardsOnMikrotik(
                     credentials = session.toCredentials(),
                     loadType = session.loadType,
                     cards = targets
                 )
+                if (res.isSuccess) {
+                    LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
+                }
             }
             repository.deleteCardsByIds(targets.map { it.id })
                 .onSuccess {

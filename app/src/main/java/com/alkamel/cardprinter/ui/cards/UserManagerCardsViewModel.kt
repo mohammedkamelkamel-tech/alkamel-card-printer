@@ -250,7 +250,7 @@ class UserManagerCardsViewModel(
 
     private suspend fun fetchSessionsLiveFor(card: CardEntity) {
         val session = LocalSessionHolder.activeSession.value
-        if (session == null || session.hostAddress.isBlank() || !session.isConnectedToMikrotik) {
+        if (session == null || !session.hasConfiguredRouter) {
             val cached = repository.getSessionsForUserOnce(card.username)
             _uiState.update {
                 if (it.inspectedCard?.username == card.username) {
@@ -275,6 +275,7 @@ class UserManagerCardsViewModel(
             repository = repository
         )
         res.onSuccess { liveSessions ->
+            LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
             _uiState.update {
                 if (it.inspectedCard?.username == card.username) {
                     it.copy(
@@ -315,14 +316,17 @@ class UserManagerCardsViewModel(
         viewModelScope.launch {
             val session = LocalSessionHolder.activeSession.value
             var mikrotikNote = ""
-            if (session != null && session.isConnectedToMikrotik) {
+            if (session != null && session.hasConfiguredRouter) {
                 val remoteRes = MikrotikSyncManager.deleteCardsOnMikrotik(
                     credentials = session.toCredentials(),
                     loadType = session.loadType,
                     cards = listOf(card)
                 )
-                if (remoteRes.isSuccess && remoteRes.getOrDefault(0) > 0) {
-                    mikrotikNote = " (وحُذف من المايكروتيك)"
+                if (remoteRes.isSuccess) {
+                    LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
+                    if (remoteRes.getOrDefault(0) > 0) {
+                        mikrotikNote = " (وحُذف من المايكروتيك)"
+                    }
                 }
             }
             repository.deleteCardsByIds(listOf(card.id))
@@ -348,7 +352,7 @@ class UserManagerCardsViewModel(
 
     fun syncFromMikrotik() {
         val session = LocalSessionHolder.activeSession.value
-        if (session == null || session.hostAddress.isBlank()) {
+        if (session == null || !session.hasConfiguredRouter) {
             _uiState.update { it.copy(errorMessage = "لا يوجد اتصال فعلي بالمايكروتيك.") }
             return
         }
@@ -359,7 +363,10 @@ class UserManagerCardsViewModel(
                 credentials = session.toCredentials(),
                 loadType = session.loadType,
                 repository = repository,
-                onProgress = { _, _ -> }
+                onProgress = { _, _ -> },
+                onSystemStatusReady = { liveStatus ->
+                    LocalSessionHolder.updateConnectionStatus(true, liveStatus, null)
+                }
             ).onSuccess { summary ->
                 LocalSessionHolder.updateConnectionStatus(true, summary.systemStatus, null)
                 LocalSessionHolder.updateLiveReportsMetrics(summary.liveReportsMetrics)
@@ -370,7 +377,6 @@ class UserManagerCardsViewModel(
                     )
                 }
             }.onFailure { err ->
-                LocalSessionHolder.updateConnectionStatus(false, null, err.localizedMessage)
                 _uiState.update {
                     it.copy(
                         isSyncing = false,
@@ -389,14 +395,17 @@ class UserManagerCardsViewModel(
         }
         viewModelScope.launch {
             val session = LocalSessionHolder.activeSession.value
-            if (session != null && session.isConnectedToMikrotik) {
-                MikrotikSyncManager.pushCardsToMikrotik(
+            if (session != null && session.hasConfiguredRouter) {
+                val pushRes = MikrotikSyncManager.pushCardsToMikrotik(
                     credentials = session.toCredentials(),
                     loadType = session.loadType,
                     cards = targetCards,
                     repository = repository,
                     onProgress = { }
                 )
+                if (pushRes.isSuccess) {
+                    LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
+                }
             }
             repository.resetCardsToUnused(targetCards.map { it.id })
                 .onSuccess {
@@ -422,13 +431,14 @@ class UserManagerCardsViewModel(
         viewModelScope.launch {
             val session = LocalSessionHolder.activeSession.value
             var mikrotikNote = ""
-            if (session != null && session.isConnectedToMikrotik) {
+            if (session != null && session.hasConfiguredRouter) {
                 val remoteRes = MikrotikSyncManager.deleteCardsOnMikrotik(
                     credentials = session.toCredentials(),
                     loadType = session.loadType,
                     cards = targetCards
                 )
                 if (remoteRes.isSuccess) {
+                    LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
                     mikrotikNote = " (وحُذف ${remoteRes.getOrDefault(0)} من المايكروتيك)"
                 }
             }

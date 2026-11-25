@@ -72,7 +72,7 @@ class SalesViewModel(
 
     fun syncSalesFromMikrotik() {
         val session = LocalSessionHolder.activeSession.value
-        if (session == null || session.hostAddress.isBlank()) {
+        if (session == null || !session.hasConfiguredRouter) {
             _uiState.update { it.copy(errorMessage = "لا يوجد اتصال فعلي بسيرفر يوزر منجر.") }
             return
         }
@@ -88,6 +88,7 @@ class SalesViewModel(
                 packages = packages,
                 repository = repository
             ).onSuccess { metrics ->
+                LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
                 LocalSessionHolder.updateLiveReportsMetrics(metrics)
                 _uiState.update {
                     it.copy(

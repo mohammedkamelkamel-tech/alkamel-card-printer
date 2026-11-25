@@ -178,7 +178,7 @@ class ReportsViewModel(
 
     fun refreshFromMikrotik() {
         val session = LocalSessionHolder.activeSession.value
-        if (session == null || session.hostAddress.isBlank() || !session.isConnectedToMikrotik) {
+        if (session == null || !session.hasConfiguredRouter) {
             return
         }
         if (_uiState.value.isRefreshingMikrotik) return
@@ -194,6 +194,7 @@ class ReportsViewModel(
                 repository = repository
             )
             result.onSuccess { metrics ->
+                LocalSessionHolder.updateConnectionStatus(isConnected = true, errorMessage = null)
                 LocalSessionHolder.updateLiveReportsMetrics(metrics)
                 _uiState.update {
                     it.copy(

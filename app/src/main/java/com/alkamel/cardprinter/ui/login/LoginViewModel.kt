@@ -192,6 +192,7 @@ class LoginViewModel(
                     password = state.password,
                     loadType = state.selectedLoadType,
                     isConnectedToMikrotik = true,
+                    isOfflineMode = false,
                     connectionError = null,
                     systemStatus = testResult.systemStatus,
                     shouldPromptFastSessionLoad = state.selectedLoadType != NetworkLoadType.NO_LOAD
@@ -218,6 +219,7 @@ class LoginViewModel(
                 password = state.password,
                 loadType = state.selectedLoadType,
                 isConnectedToMikrotik = false,
+                isOfflineMode = true,
                 connectionError = "غير متصل بسيرفر المايكروتيك حالياً — القراءات المباشرة غير متاحة حتى يتم الربط.",
                 systemStatus = null,
                 shouldPromptFastSessionLoad = false

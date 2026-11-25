@@ -3,6 +3,7 @@ package com.alkamel.cardprinter.data.session
 import com.alkamel.cardprinter.data.local.model.NetworkLoadType
 import com.alkamel.cardprinter.data.mikrotik.MikrotikCredentials
 import com.alkamel.cardprinter.data.mikrotik.MikrotikLiveReportsMetrics
+import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import com.alkamel.cardprinter.data.mikrotik.MikrotikSystemStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +17,7 @@ data class ActiveSession(
     val password: String = "",
     val loadType: NetworkLoadType = NetworkLoadType.LOAD_USER_MANAGER,
     val isConnectedToMikrotik: Boolean = false,
+    val isOfflineMode: Boolean = false,
     val connectionError: String? = null,
     val systemStatus: MikrotikSystemStatus? = null,
     val shouldPromptFastSessionLoad: Boolean = false
@@ -26,6 +28,9 @@ data class ActiveSession(
         username = username,
         password = password
     )
+
+    val hasConfiguredRouter: Boolean
+        get() = hostAddress.isNotBlank() && !isOfflineMode
 }
 
 object LocalSessionHolder {
@@ -36,17 +41,23 @@ object LocalSessionHolder {
     val liveReportsMetrics: StateFlow<MikrotikLiveReportsMetrics?> = _liveReportsMetrics.asStateFlow()
 
     fun setSession(session: ActiveSession) {
+        MikrotikSyncManager.closeTelemetryConnection()
         _activeSession.value = session
     }
 
     fun updateConnectionStatus(
         isConnected: Boolean,
         systemStatus: MikrotikSystemStatus? = null,
-        errorMessage: String? = null
+        errorMessage: String? = null,
+        clearSystemStatus: Boolean = false
     ) {
         _activeSession.value = _activeSession.value?.copy(
             isConnectedToMikrotik = isConnected,
-            systemStatus = systemStatus ?: if (!isConnected) null else _activeSession.value?.systemStatus,
+            systemStatus = when {
+                systemStatus != null -> systemStatus
+                clearSystemStatus -> null
+                else -> _activeSession.value?.systemStatus
+            },
             connectionError = errorMessage
         )
     }
@@ -60,6 +71,7 @@ object LocalSessionHolder {
     }
 
     fun clearSession() {
+        MikrotikSyncManager.closeTelemetryConnection()
         _activeSession.value = null
         _liveReportsMetrics.value = null
     }

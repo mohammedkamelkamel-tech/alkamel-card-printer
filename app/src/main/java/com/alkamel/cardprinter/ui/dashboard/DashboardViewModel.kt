@@ -57,6 +57,7 @@ class DashboardViewModel(
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
 
     private var livePollingJob: Job? = null
+    private var consecutiveTelemetryFailures = 0
 
     init {
         viewModelScope.launch {
@@ -85,11 +86,11 @@ class DashboardViewModel(
                         routerOsVersion = status?.routerOsVersion.orEmpty(),
                         isConnectedToMikrotik = connected,
                         connectionError = session?.connectionError,
-                        cpuPercent = if (connected) status?.cpuLoadPercent else null,
-                        activeConnectionsCount = if (connected) status?.activeConnectionsCount else null,
-                        uptimeDisplay = if (connected) status?.uptimeDisplay else null,
-                        todayDownloadDisplay = if (connected) status?.totalDownloadDisplay else null,
-                        lastLiveUpdateLabel = if (connected && status != null) {
+                        cpuPercent = status?.cpuLoadPercent,
+                        activeConnectionsCount = status?.activeConnectionsCount,
+                        uptimeDisplay = status?.uptimeDisplay,
+                        todayDownloadDisplay = status?.totalDownloadDisplay,
+                        lastLiveUpdateLabel = if (status != null) {
                             formatTimeShort(status.fetchedAtMillis)
                         } else {
                             ""
@@ -110,35 +111,43 @@ class DashboardViewModel(
     }
 
     /**
-     * Periodic live polling every 5 seconds while Dashboard is visible and connected to MikroTik.
-     * Fetches real CPU load, active users, uptime, and live download without blocking UI.
+     * Periodic live polling over the persistent reusable telemetry connection while Dashboard is active.
+     * Continues attempting automatic reconnection whenever a router is configured (even after temporary
+     * network drops) and only marks disconnected after 3 consecutive real failures.
      */
     fun startLivePolling() {
         if (livePollingJob?.isActive == true) return
         livePollingJob = viewModelScope.launch {
             while (isActive) {
                 val session = LocalSessionHolder.activeSession.value
-                if (session != null &&
-                    session.hostAddress.isNotBlank() &&
-                    session.isConnectedToMikrotik &&
-                    !_uiState.value.isLoadingSessions
-                ) {
+                if (session != null && session.hasConfiguredRouter) {
                     _uiState.update { it.copy(isLiveRefreshing = true) }
                     val res = MikrotikSyncManager.fetchLiveTelemetry(session.toCredentials())
                     res.onSuccess { status ->
+                        consecutiveTelemetryFailures = 0
                         LocalSessionHolder.updateConnectionStatus(
                             isConnected = true,
                             systemStatus = status,
                             errorMessage = null
                         )
                     }.onFailure { err ->
-                        _uiState.update {
-                            it.copy(connectionError = err.localizedMessage)
+                        consecutiveTelemetryFailures++
+                        val realErr = err.localizedMessage ?: "تعذر الاتصال بسيرفر المايكروتيك."
+                        if (consecutiveTelemetryFailures >= 3) {
+                            LocalSessionHolder.updateConnectionStatus(
+                                isConnected = false,
+                                systemStatus = null,
+                                errorMessage = realErr,
+                                clearSystemStatus = true
+                            )
+                        } else {
+                            _uiState.update { it.copy(connectionError = realErr) }
                         }
                     }
                     _uiState.update { it.copy(isLiveRefreshing = false) }
                 }
-                delay(5000L)
+                val nextDelay = if (consecutiveTelemetryFailures >= 3) 7000L else 5000L
+                delay(nextDelay)
             }
         }
     }
@@ -206,10 +215,19 @@ class DashboardViewModel(
                             sessionLoadLabel = label
                         )
                     }
+                },
+                onSystemStatusReady = { liveStatus ->
+                    consecutiveTelemetryFailures = 0
+                    LocalSessionHolder.updateConnectionStatus(
+                        isConnected = true,
+                        systemStatus = liveStatus,
+                        errorMessage = null
+                    )
                 }
             )
 
             result.onSuccess { summary ->
+                consecutiveTelemetryFailures = 0
                 LocalSessionHolder.updateConnectionStatus(
                     isConnected = true,
                     systemStatus = summary.systemStatus,
@@ -234,12 +252,8 @@ class DashboardViewModel(
                     )
                 }
             }.onFailure { err ->
-                val msg = err.localizedMessage ?: "تعذر الاتصال بسيرفر المايكروتيك."
-                LocalSessionHolder.updateConnectionStatus(
-                    isConnected = false,
-                    systemStatus = null,
-                    errorMessage = msg
-                )
+                val msg = err.localizedMessage ?: "تعذر إكمال مزامنة بيانات يوزر منجر من المايكروتيك."
+                // Do not immediately wipe live gauges or kill polling; let telemetry verify actual connectivity
                 _uiState.update {
                     it.copy(
                         isLoadingSessions = false,
