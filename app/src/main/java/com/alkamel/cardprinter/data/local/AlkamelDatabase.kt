@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.alkamel.cardprinter.AlkamelCardPrinterApplication
 import com.alkamel.cardprinter.data.local.converter.AlkamelTypeConverters
@@ -34,7 +35,7 @@ import kotlinx.coroutines.launch
         PrintSalesLogEntity::class,
         CardSessionEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(AlkamelTypeConverters::class)
@@ -61,12 +62,19 @@ abstract class AlkamelDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE print_sales_logs ADD COLUMN connectionVlan TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         private fun buildDatabase(appContext: Context): AlkamelDatabase {
             return Room.databaseBuilder(
                 appContext,
                 AlkamelDatabase::class.java,
                 AlkamelCardPrinterApplication.DATABASE_NAME
             )
+                .addMigrations(MIGRATION_3_4)
                 .fallbackToDestructiveMigration()
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .addCallback(

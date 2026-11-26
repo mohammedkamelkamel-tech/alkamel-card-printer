@@ -82,6 +82,7 @@ import com.alkamel.cardprinter.data.local.entity.CardEntity
 import com.alkamel.cardprinter.data.local.entity.CardSessionEntity
 import com.alkamel.cardprinter.data.local.model.CardStatus
 import com.alkamel.cardprinter.ui.components.AlkamelConfirmationDialog
+import com.alkamel.cardprinter.ui.components.AlkamelDatePickerField
 import com.alkamel.cardprinter.ui.components.AlkamelTopHeader
 import com.alkamel.cardprinter.ui.theme.AlkamelTheme
 
@@ -176,19 +177,16 @@ fun UserManagerCardsScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedTextField(
+                AlkamelDatePickerField(
                     value = state.printDateQuery,
-                    onValueChange = viewModel::onPrintDateQueryChange,
-                    placeholder = { Text("تاريخ الطباعة (مثال: 2026-11-21)") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.weight(1f),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = ext.inputContainer,
-                        unfocusedContainerColor = ext.inputContainer,
-                        focusedTextColor = ext.inputText,
-                        unfocusedTextColor = ext.inputText
-                    )
+                    onDateSelected = { picked ->
+                        viewModel.onPrintDateQueryChange(picked)
+                        viewModel.applyPrintDateSearch()
+                    },
+                    placeholder = "اختر تاريخ الطباعة",
+                    allowClear = true,
+                    onClear = viewModel::clearDateSearch,
+                    modifier = Modifier.weight(1f)
                 )
                 Button(
                     onClick = viewModel::applyPrintDateSearch,

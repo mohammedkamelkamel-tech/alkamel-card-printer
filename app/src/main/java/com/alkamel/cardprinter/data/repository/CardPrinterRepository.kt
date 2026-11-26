@@ -8,6 +8,7 @@ import com.alkamel.cardprinter.data.local.entity.CardSessionEntity
 import com.alkamel.cardprinter.data.local.entity.CardTemplateEntity
 import com.alkamel.cardprinter.data.local.entity.PrintSalesLogEntity
 import com.alkamel.cardprinter.data.local.entity.SavedNetworkEntity
+import com.alkamel.cardprinter.data.local.entity.effectiveOperationsCount
 import com.alkamel.cardprinter.data.local.model.CardCountsSummary
 import com.alkamel.cardprinter.data.local.model.ComprehensiveSalesReport
 import com.alkamel.cardprinter.data.local.model.PackageCardCount
@@ -15,6 +16,7 @@ import com.alkamel.cardprinter.data.local.model.PeriodSalesSummary
 import com.alkamel.cardprinter.data.local.model.SaleOperationType
 import com.alkamel.cardprinter.data.local.model.TopSellingPackageStat
 import com.alkamel.cardprinter.data.local.util.DateTimeUtils
+import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -49,8 +51,19 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
     suspend fun savePackage(pkg: CardPackageEntity): Result<Long> = safeDbCall {
         database.withTransaction {
             val id = packageDao.upsertPackage(pkg)
-            if (pkg.name.isNotBlank() && pkg.price > 0.0) {
-                cardDao.updatePriceForPackage(pkg.name.trim(), pkg.price)
+            val cleanName = pkg.name.trim()
+            if (cleanName.isNotBlank() && pkg.price > 0.0) {
+                cardDao.updatePriceForPackage(cleanName, pkg.price)
+            }
+            if (cleanName.isNotBlank()) {
+                val uptimeLimitMin = MikrotikSyncManager.parseRouterOsDurationSeconds(pkg.validityLabel) / 60L
+                if (pkg.dataLimitMb > 0.0 || uptimeLimitMin > 0L) {
+                    cardDao.markExpiredCardsForPackageLimits(
+                        packageName = cleanName,
+                        dataLimitMb = pkg.dataLimitMb,
+                        uptimeLimitMinutes = uptimeLimitMin
+                    )
+                }
             }
             id
         }
@@ -215,6 +228,15 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
         }
     }
 
+    suspend fun markCardsAsExpired(cardIds: List<Long>): Result<Unit> = safeDbCall {
+        if (cardIds.isEmpty()) return@safeDbCall
+        database.withTransaction {
+            cardIds.chunked(500).forEach { chunk ->
+                cardDao.markCardsExpired(chunk)
+            }
+        }
+    }
+
     suspend fun deleteCardsByIds(cardIds: List<Long>): Result<Unit> = safeDbCall {
         if (cardIds.isEmpty()) return@safeDbCall
         database.withTransaction {
@@ -274,7 +296,7 @@ class CardPrinterRepository(private val database: AlkamelDatabase) {
             fun summarize(items: List<PrintSalesLogEntity>) = PeriodSalesSummary(
                 totalAmount = items.sumOf { it.totalAmount },
                 totalCards = items.sumOf { it.cardsCount },
-                operationsCount = items.size
+                operationsCount = items.sumOf { it.effectiveOperationsCount() }
             )
 
             val monthLogs = logs.filter { it.dateKey >= monthStart }

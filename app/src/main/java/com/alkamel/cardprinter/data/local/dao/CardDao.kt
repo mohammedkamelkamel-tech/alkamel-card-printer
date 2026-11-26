@@ -77,6 +77,27 @@ interface CardDao {
     @Query("UPDATE cards SET status = 'UNUSED', isPrinted = 0, printedAt = NULL, printedDateKey = NULL WHERE id IN (:cardIds)")
     suspend fun resetCardsToUnused(cardIds: List<Long>)
 
+    @Query("UPDATE cards SET status = 'EXPIRED' WHERE id IN (:cardIds)")
+    suspend fun markCardsExpired(cardIds: List<Long>)
+
+    @Query(
+        """
+        UPDATE cards
+        SET status = 'EXPIRED'
+        WHERE LOWER(packageName) = LOWER(:packageName)
+          AND status != 'EXPIRED'
+          AND (
+              (:dataLimitMb > 0.0 AND dataUsageMb >= (:dataLimitMb * 0.99))
+              OR (:uptimeLimitMinutes > 0 AND uptimeMinutes >= :uptimeLimitMinutes)
+          )
+        """
+    )
+    suspend fun markExpiredCardsForPackageLimits(
+        packageName: String,
+        dataLimitMb: Double,
+        uptimeLimitMinutes: Long
+    ): Int
+
     @Query("DELETE FROM cards WHERE id IN (:cardIds)")
     suspend fun deleteCardsByIds(cardIds: List<Long>)
 }

@@ -20,6 +20,7 @@ data class PrintSalesLogEntity(
     val totalAmount: Double = 0.0,
     val commissionTotal: Double = 0.0,
     val serverAccount: String = "",
+    val connectionVlan: String = "",
     val downloadLabel: String = "0 MB",
     val downloadMb: Double = 0.0,
     val printMethod: PrintMethod = PrintMethod.PDF_A4_GRID,
@@ -27,3 +28,19 @@ data class PrintSalesLogEntity(
     val dateKey: String,
     val createdAt: Long = System.currentTimeMillis()
 )
+
+/**
+ * Returns the accurate number of operations represented by this sales log entry:
+ * - Grouped historical MikroTik summary rows represent [cardsCount] individual card sales.
+ * - Individual card sale rows and local print/export batches represent 1 operation.
+ */
+fun PrintSalesLogEntity.effectiveOperationsCount(): Int {
+    val isGroupedRemoteSummary = operationType == SaleOperationType.DIRECT_SALE &&
+        cardsCount > 1 &&
+        (
+            cardUsername.startsWith("مدفوعات يوزر منجر") ||
+                cardUsername.startsWith("مبيعات يوزر منجر") ||
+                cardUsername.startsWith("كروت مستهلكة")
+            )
+    return if (isGroupedRemoteSummary) cardsCount else 1
+}

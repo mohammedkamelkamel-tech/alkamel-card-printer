@@ -1,5 +1,8 @@
 package com.alkamel.cardprinter
 
+import com.alkamel.cardprinter.data.local.entity.PrintSalesLogEntity
+import com.alkamel.cardprinter.data.local.entity.effectiveOperationsCount
+import com.alkamel.cardprinter.data.local.model.SaleOperationType
 import com.alkamel.cardprinter.data.mikrotik.MikrotikApiClient
 import com.alkamel.cardprinter.data.mikrotik.MikrotikCredentials
 import com.alkamel.cardprinter.data.mikrotik.MikrotikSyncManager
@@ -254,6 +257,141 @@ class MikrotikRouterOsProtocolTest {
         val msg = unreachable.errorMessage.orEmpty()
         assertFalse("Must never show stale closed-socket message on unreachable port", msg.contains("الاتصال بالمايكروتيك مغلق"))
         assertTrue("Expected clear unreachable error message, got: $msg", msg.contains("تعذر الوصول") || msg.contains("تعذر الاتصال"))
+    }
+
+    @Test
+    fun testRouterOsBytesDurationAndTimestampParsersForExpiryDetection() {
+        // Raw bytes & MikroTik unit suffixes
+        assertEquals(2_418_016_256L, MikrotikSyncManager.parseRouterOsBytes("2418016256"))
+        assertEquals(1200L * 1024L * 1024L, MikrotikSyncManager.parseRouterOsBytes("1200M"))
+        assertEquals(2306L * 1024L * 1024L, MikrotikSyncManager.parseRouterOsBytes("2306MiB"))
+        assertEquals(2L * 1024L * 1024L * 1024L, MikrotikSyncManager.parseRouterOsBytes("2G"))
+        assertEquals(0L, MikrotikSyncManager.parseRouterOsBytes("0B"))
+        assertEquals(0L, MikrotikSyncManager.parseRouterOsBytes("unlimited"))
+
+        // RouterOS shorthand & colon-separated durations (HH:MM:SS and hybrid)
+        assertEquals(6L * 3600L + 24L * 60L + 7L, MikrotikSyncManager.parseRouterOsDurationSeconds("6h24m7s"))
+        assertEquals(13L * 3600L + 38L * 60L, MikrotikSyncManager.parseRouterOsDurationSeconds("13h38m"))
+        assertEquals(12L * 3600L, MikrotikSyncManager.parseRouterOsDurationSeconds("12:00:00"))
+        assertEquals(86400L + 6L * 3600L + 24L * 60L + 7L, MikrotikSyncManager.parseRouterOsDurationSeconds("1d 06:24:07"))
+
+        // Timestamps
+        assertNotNull(MikrotikSyncManager.parseMikrotikTimestampMillis("nov/26/2026 14:20:05"))
+        assertNotNull(MikrotikSyncManager.parseMikrotikTimestampMillis("2026-11-26 14:20:05"))
+        assertEquals(null, MikrotikSyncManager.parseMikrotikTimestampMillis("never"))
+    }
+
+    @Test
+    fun testSalesEffectiveOperationsCountDoesNotMiscountGroupedLogs() {
+        val singleSale = PrintSalesLogEntity(
+            cardUsername = "39400704022",
+            packageName = "100-Plus",
+            cardsCount = 1,
+            unitPrice = 100.0,
+            totalAmount = 100.0,
+            operationType = SaleOperationType.DIRECT_SALE,
+            dateKey = "2026-11-26"
+        )
+        assertEquals(1, singleSale.effectiveOperationsCount())
+
+        val printBatch = PrintSalesLogEntity(
+            cardUsername = "دفعة طباعة (72 كرت)",
+            packageName = "100-Plus",
+            cardsCount = 72,
+            unitPrice = 100.0,
+            totalAmount = 7200.0,
+            operationType = SaleOperationType.PRINT_SALE,
+            dateKey = "2026-11-26"
+        )
+        assertEquals(1, printBatch.effectiveOperationsCount())
+
+        val groupedHistoricalDirectSales = PrintSalesLogEntity(
+            cardUsername = "مدفوعات يوزر منجر • 100-Plus",
+            packageName = "100-Plus",
+            cardsCount = 5,
+            unitPrice = 100.0,
+            totalAmount = 500.0,
+            operationType = SaleOperationType.DIRECT_SALE,
+            dateKey = "2026-10-15"
+        )
+        assertEquals(5, groupedHistoricalDirectSales.effectiveOperationsCount())
+    }
+
+    @Test
+    fun testVlanResolutionReplacesPhysicalPortAndFallsBackCleanly() {
+        val subnetVlan30 = MikrotikSyncManager.parseIpv4Cidr("10.10.30.1/24", "vlan30")
+        assertNotNull(subnetVlan30)
+
+        val lookup = MikrotikSyncManager.RouterVlanLookup(
+            vlanByInterfaceName = mapOf(
+                "vlan10" to "vlan10 (VLAN 10)",
+                "vlan20" to "vlan20 (VLAN 20)",
+                "vlan30" to "vlan30 (VLAN 30)",
+                "vlan-north" to "vlan-north (VLAN 110)"
+            ),
+            vlanById = mapOf(
+                "10" to "vlan10 (VLAN 10)",
+                "20" to "vlan20 (VLAN 20)",
+                "30" to "vlan30 (VLAN 30)",
+                "110" to "vlan-north (VLAN 110)"
+            ),
+            vlansByParentInterface = mapOf(
+                "ether11" to listOf("vlan-north (VLAN 110)")
+            ),
+            interfaceByHotspotServer = mapOf(
+                "hs-vlan10" to "vlan10"
+            ),
+            vlanIdByMac = mapOf(
+                "aa:bb:cc:dd:ee:01" to "20",
+                "aa:bb:cc:dd:ee:99" to "99"
+            ),
+            interfaceByMac = mapOf(
+                "aa:bb:cc:dd:ee:02" to "vlan30"
+            ),
+            interfaceByIp = mapOf(
+                "10.10.10.55" to "vlan10"
+            ),
+            subnets = listOfNotNull(subnetVlan30)
+        )
+
+        // 1. Direct VLAN nas-port-id or Hotspot server mapped to a VLAN
+        assertEquals(
+            "vlan10 (VLAN 10)",
+            MikrotikSyncManager.resolveVlanOrPort("vlan10", "", "", lookup)
+        )
+        assertEquals(
+            "vlan10 (VLAN 10)",
+            MikrotikSyncManager.resolveVlanOrPort("hs-vlan10", "", "", lookup)
+        )
+
+        // 2. Physical port ether7 with Bridge MAC vid=20 -> returns VLAN 20 instead of ether7
+        assertEquals(
+            "vlan20 (VLAN 20)",
+            MikrotikSyncManager.resolveVlanOrPort("ether7", "", "AA:BB:CC:DD:EE:01", lookup)
+        )
+        // Bridge vid not named in /interface/vlan -> returns "VLAN 99" instead of ether7
+        assertEquals(
+            "VLAN 99",
+            MikrotikSyncManager.resolveVlanOrPort("ether7", "", "AA:BB:CC:DD:EE:99", lookup)
+        )
+
+        // 3. Physical port ether6 with client IP inside 10.10.30.0/24 -> returns vlan30 instead of ether6
+        assertEquals(
+            "vlan30 (VLAN 30)",
+            MikrotikSyncManager.resolveVlanOrPort("ether6", "10.10.30.45", "", lookup)
+        )
+
+        // 4. Physical port ether11 hosting vlan-north -> returns vlan-north instead of ether11
+        assertEquals(
+            "vlan-north (VLAN 110)",
+            MikrotikSyncManager.resolveVlanOrPort("ether11", "", "", lookup)
+        )
+
+        // 5. Physical port ether5 with NO VLAN anywhere -> keeps physical port strictly as fallback
+        assertEquals(
+            "ether5",
+            MikrotikSyncManager.resolveVlanOrPort("ether5", "192.168.88.10", "11:22:33:44:55:66", lookup)
+        )
     }
 
     /**

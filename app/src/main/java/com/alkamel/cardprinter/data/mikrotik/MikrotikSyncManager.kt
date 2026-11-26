@@ -55,10 +55,15 @@ object MikrotikSyncManager {
 
     private val CURRENCY_SUFFIX_REGEX = Regex("""(\d+(?:\.\d+)?)\s*(?:yr|ry|yer|sar|ريال)""", RegexOption.IGNORE_CASE)
     private val DURATION_TOKEN_REGEX = Regex("""(\d+)([wdhms])""", RegexOption.IGNORE_CASE)
+    private val COLON_TIME_REGEX = Regex("""(?:^|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?""")
+    private val BYTE_SIZE_REGEX = Regex("""^\s*(\d+(?:\.\d+)?)\s*(tib|tb|t|gib|gb|g|mib|mb|m|kib|kb|k|b)?\s*$""", RegexOption.IGNORE_CASE)
 
     private data class ProfileLimitationMeta(
         val transferLimitBytes: Long = 0L,
+        val downloadLimitBytes: Long = 0L,
+        val uploadLimitBytes: Long = 0L,
         val uptimeLimitSeconds: Long = 0L,
+        val validitySeconds: Long = 0L,
         val validityLabel: String = ""
     )
 
@@ -80,7 +85,27 @@ object MikrotikSyncManager {
     private data class SessionSalesBucket(
         var count: Int = 0,
         var totalAmount: Double = 0.0,
-        var totalBytes: Long = 0L
+        var totalBytes: Long = 0L,
+        var latestMillis: Long = 0L
+    )
+
+    internal data class RouterCidrInterface(
+        val networkInt: Int,
+        val maskInt: Int,
+        val prefixLength: Int,
+        val interfaceName: String
+    )
+
+    internal data class RouterVlanLookup(
+        val vlanByInterfaceName: Map<String, String> = emptyMap(),
+        val vlanById: Map<String, String> = emptyMap(),
+        val vlansByParentInterface: Map<String, List<String>> = emptyMap(),
+        val interfaceByHotspotServer: Map<String, String> = emptyMap(),
+        val vlanIdByMac: Map<String, String> = emptyMap(),
+        val interfaceByMac: Map<String, String> = emptyMap(),
+        val interfaceByIp: Map<String, String> = emptyMap(),
+        val activeUserHint: Map<String, Triple<String, String, String>> = emptyMap(),
+        val subnets: List<RouterCidrInterface> = emptyList()
     )
 
     private data class UserManagerSalesSyncBundle(
@@ -181,16 +206,48 @@ object MikrotikSyncManager {
             // Ensure socket is open before querying profiles (recovers automatically if any probe timed out)
             client.ensureConnected(credentials).getOrElse { return@withContext Result.failure(it) }
 
-            // 1. Fetch ALL User Manager profiles + limitations
-            onProgress(20, "جاري جلب جميع باقات يوزر منجر...")
-            val limitationsByProfile = fetchProfileLimitationsBestEffort(client, credentials, isV7)
+            // 1. Fetch ALL User Manager profiles + limitations (resolving both name and .id links)
+            onProgress(20, "جاري جلب جميع باقات يوزر منجر وحدود الصلاحية...")
+            val rawProfileRecords = fetchRawProfileRecords(client, credentials, isV7)
+            val limitationsByProfile = fetchProfileLimitationsBestEffort(
+                client = client,
+                credentials = credentials,
+                isV7 = isV7,
+                rawProfileRecords = rawProfileRecords
+            ).toMutableMap()
             client.ensureConnected(credentials).getOrElse { return@withContext Result.failure(it) }
 
-            val fetchedPackages = fetchUserManagerPackagesInternal(client, credentials, isV7, limitationsByProfile)
+            val fetchedPackages = parseUserManagerPackages(rawProfileRecords, limitationsByProfile)
             var mergedPackages = if (fetchedPackages.isNotEmpty()) {
                 repository.mergePackagesFromMikrotik(fetchedPackages).getOrDefault(fetchedPackages)
             } else {
                 repository.getAllPackagesOnce()
+            }
+
+            // Merge locally configured package limits from Room as fallback into limitationsByProfile
+            mergedPackages.forEach { pkg ->
+                val key = pkg.name.trim().lowercase()
+                if (key.isBlank()) return@forEach
+                val existing = limitationsByProfile[key]
+                val localBytes = if (pkg.dataLimitMb > 0.0) (pkg.dataLimitMb * 1024.0 * 1024.0).toLong() else 0L
+                val localUptimeSec = parseRouterOsDurationSeconds(pkg.validityLabel)
+                if (existing == null) {
+                    if (localBytes > 0L || localUptimeSec > 0L) {
+                        limitationsByProfile[key] = ProfileLimitationMeta(
+                            transferLimitBytes = localBytes,
+                            uptimeLimitSeconds = localUptimeSec,
+                            validitySeconds = localUptimeSec,
+                            validityLabel = pkg.validityLabel
+                        )
+                    }
+                } else {
+                    limitationsByProfile[key] = existing.copy(
+                        transferLimitBytes = maxOf(existing.transferLimitBytes, localBytes),
+                        uptimeLimitSeconds = maxOf(existing.uptimeLimitSeconds, localUptimeSec),
+                        validitySeconds = maxOf(existing.validitySeconds, localUptimeSec),
+                        validityLabel = existing.validityLabel.ifBlank { pkg.validityLabel }
+                    )
+                }
             }
 
             // 2. Fetch ALL User Manager cards via streaming (no filter, no limit, full snapshot)
@@ -638,12 +695,64 @@ object MikrotikSyncManager {
         )
     }
 
-    private suspend fun fetchProfileLimitationsBestEffort(
+    private suspend fun fetchRawProfileRecords(
         client: MikrotikApiClient,
         credentials: MikrotikCredentials,
         isV7: Boolean
+    ): List<Map<String, String>> {
+        val primaryCmd = if (isV7) "/user-manager/profile/print" else "/tool/user-manager/profile/print"
+        val fallbackCmd = if (isV7) "/tool/user-manager/profile/print" else "/user-manager/profile/print"
+
+        client.ensureConnected(credentials)
+        val primaryRes = client.execute(primaryCmd, timeoutMs = 30000).getOrNull()
+        if (primaryRes != null && primaryRes.isSuccess) {
+            return primaryRes.records
+        }
+        client.ensureConnected(credentials)
+        return client.execute(fallbackCmd, timeoutMs = 30000).getOrNull()
+            ?.takeIf { it.isSuccess }?.records.orEmpty()
+    }
+
+    private suspend fun fetchProfileLimitationsBestEffort(
+        client: MikrotikApiClient,
+        credentials: MikrotikCredentials,
+        isV7: Boolean,
+        rawProfileRecords: List<Map<String, String>>
     ): Map<String, ProfileLimitationMeta> {
         val result = HashMap<String, ProfileLimitationMeta>()
+
+        // Seed validity from profiles and map profile .id / name-for-users -> canonical name
+        val profileAliasToKeys = HashMap<String, MutableSet<String>>()
+        rawProfileRecords.forEach { r ->
+            val name = r["name"].orEmpty().trim()
+            val nameForUsers = r["name-for-users"].orEmpty().trim()
+            val id = r[".id"].orEmpty().trim()
+            val canonicalKeys = LinkedHashSet<String>()
+            if (name.isNotBlank()) canonicalKeys.add(name.lowercase())
+            if (nameForUsers.isNotBlank()) canonicalKeys.add(nameForUsers.lowercase())
+            if (canonicalKeys.isEmpty()) return@forEach
+
+            val validityRaw = r["validity"].orEmpty().trim()
+            val validitySec = parseRouterOsDurationSeconds(validityRaw)
+            canonicalKeys.forEach { key ->
+                if (validitySec > 0L || validityRaw.isNotBlank()) {
+                    val prev = result[key]
+                    result[key] = ProfileLimitationMeta(
+                        transferLimitBytes = prev?.transferLimitBytes ?: 0L,
+                        downloadLimitBytes = prev?.downloadLimitBytes ?: 0L,
+                        uploadLimitBytes = prev?.uploadLimitBytes ?: 0L,
+                        uptimeLimitSeconds = prev?.uptimeLimitSeconds ?: 0L,
+                        validitySeconds = maxOf(prev?.validitySeconds ?: 0L, validitySec),
+                        validityLabel = prev?.validityLabel?.takeIf { it.isNotBlank() } ?: validityRaw
+                    )
+                }
+                profileAliasToKeys.getOrPut(key) { LinkedHashSet() }.addAll(canonicalKeys)
+            }
+            if (id.isNotBlank()) {
+                profileAliasToKeys.getOrPut(id.lowercase()) { LinkedHashSet() }.addAll(canonicalKeys)
+            }
+        }
+
         runCatching {
             client.ensureConnected(credentials)
             val limCmd = if (isV7) "/user-manager/limitation/print" else "/tool/user-manager/profile/limitation/print"
@@ -657,63 +766,63 @@ object MikrotikSyncManager {
 
             if (limRecords.isEmpty()) return result
 
-            val limByName = HashMap<String, ProfileLimitationMeta>()
+            val limByKey = HashMap<String, ProfileLimitationMeta>()
             limRecords.forEach { r ->
                 val name = r["name"].orEmpty().trim().lowercase()
-                if (name.isBlank()) return@forEach
-                val transfer = r["transfer-limit"]?.toLongOrNull() ?: 0L
-                val dl = r["download-limit"]?.toLongOrNull() ?: 0L
-                val ul = r["upload-limit"]?.toLongOrNull() ?: 0L
-                val effectiveBytes = when {
+                val id = r[".id"].orEmpty().trim().lowercase()
+                if (name.isBlank() && id.isBlank()) return@forEach
+
+                val transfer = parseRouterOsBytes(r["transfer-limit"])
+                val dl = parseRouterOsBytes(r["download-limit"])
+                val ul = parseRouterOsBytes(r["upload-limit"])
+                val effectiveTransfer = when {
                     transfer > 0L -> transfer
-                    dl > 0L || ul > 0L -> dl + ul
+                    dl > 0L && ul > 0L -> dl + ul
+                    dl > 0L -> dl
+                    ul > 0L -> ul
                     else -> 0L
                 }
                 val uptimeStr = r["uptime-limit"].orEmpty().trim()
                 val uptimeSec = parseRouterOsDurationSeconds(uptimeStr)
-                limByName[name] = ProfileLimitationMeta(
-                    transferLimitBytes = effectiveBytes,
+                val meta = ProfileLimitationMeta(
+                    transferLimitBytes = effectiveTransfer,
+                    downloadLimitBytes = dl,
+                    uploadLimitBytes = ul,
                     uptimeLimitSeconds = uptimeSec,
                     validityLabel = uptimeStr
                 )
+                if (name.isNotBlank()) limByKey[name] = meta
+                if (id.isNotBlank()) limByKey[id] = meta
             }
 
             linkRecords.forEach { link ->
-                val profName = link["profile"].orEmpty().trim().lowercase()
-                val limName = link["limitation"].orEmpty().trim().lowercase()
-                val meta = limByName[limName] ?: return@forEach
-                if (profName.isBlank()) return@forEach
-                val prev = result[profName]
-                result[profName] = ProfileLimitationMeta(
-                    transferLimitBytes = maxOf(prev?.transferLimitBytes ?: 0L, meta.transferLimitBytes),
-                    uptimeLimitSeconds = maxOf(prev?.uptimeLimitSeconds ?: 0L, meta.uptimeLimitSeconds),
-                    validityLabel = (prev?.validityLabel?.takeIf { it.isNotBlank() }) ?: meta.validityLabel
-                )
+                val profRaw = link["profile"].orEmpty().trim().lowercase()
+                val limRaw = link["limitation"].orEmpty().trim().lowercase()
+                if (profRaw.isBlank() || limRaw.isBlank()) return@forEach
+                val meta = limByKey[limRaw] ?: return@forEach
+
+                val targetProfileKeys = profileAliasToKeys[profRaw] ?: setOf(profRaw)
+                targetProfileKeys.forEach { profKey ->
+                    val prev = result[profKey]
+                    result[profKey] = ProfileLimitationMeta(
+                        transferLimitBytes = maxOf(prev?.transferLimitBytes ?: 0L, meta.transferLimitBytes),
+                        downloadLimitBytes = maxOf(prev?.downloadLimitBytes ?: 0L, meta.downloadLimitBytes),
+                        uploadLimitBytes = maxOf(prev?.uploadLimitBytes ?: 0L, meta.uploadLimitBytes),
+                        uptimeLimitSeconds = maxOf(prev?.uptimeLimitSeconds ?: 0L, meta.uptimeLimitSeconds),
+                        validitySeconds = prev?.validitySeconds ?: 0L,
+                        validityLabel = prev?.validityLabel?.takeIf { it.isNotBlank() } ?: meta.validityLabel
+                    )
+                }
             }
         }
         return result
     }
 
-    private suspend fun fetchUserManagerPackagesInternal(
-        client: MikrotikApiClient,
-        credentials: MikrotikCredentials,
-        isV7: Boolean,
+    private fun parseUserManagerPackages(
+        records: List<Map<String, String>>,
         limitationsByProfile: Map<String, ProfileLimitationMeta>
     ): List<CardPackageEntity> {
         val result = LinkedHashMap<String, CardPackageEntity>()
-        val primaryCmd = if (isV7) "/user-manager/profile/print" else "/tool/user-manager/profile/print"
-        val fallbackCmd = if (isV7) "/tool/user-manager/profile/print" else "/user-manager/profile/print"
-
-        client.ensureConnected(credentials)
-        val primaryRes = client.execute(primaryCmd, timeoutMs = 30000).getOrNull()
-        val records = if (primaryRes != null && primaryRes.isSuccess) {
-            primaryRes.records
-        } else {
-            client.ensureConnected(credentials)
-            client.execute(fallbackCmd, timeoutMs = 30000).getOrNull()
-                ?.takeIf { it.isSuccess }?.records.orEmpty()
-        }
-
         records.forEach { r ->
             val name = r["name"].orEmpty().trim()
             if (name.isNotBlank()) {
@@ -723,8 +832,13 @@ object MikrotikSyncManager {
                     ?: 0.0
                 val price = if (routerPrice > 0.0) routerPrice else inferPriceFromPackageName(name)
                 val limMeta = limitationsByProfile[name.lowercase()]
+                    ?: r["name-for-users"]?.trim()?.lowercase()?.let { limitationsByProfile[it] }
                 val validity = r["validity"].orEmpty().trim().ifBlank { limMeta?.validityLabel.orEmpty() }
-                val dataLimitMb = (limMeta?.transferLimitBytes ?: 0L) / (1024.0 * 1024.0)
+                val dataBytes = maxOf(
+                    limMeta?.transferLimitBytes ?: 0L,
+                    limMeta?.downloadLimitBytes ?: 0L
+                )
+                val dataLimitMb = dataBytes / (1024.0 * 1024.0)
 
                 result[name.lowercase()] = CardPackageEntity(
                     name = name,
@@ -748,7 +862,7 @@ object MikrotikSyncManager {
         onCountProgress: (Int) -> Unit
     ): Result<List<CardEntity>> {
         return if (isV7) {
-            val v7Res = fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, onCountProgress)
+            val v7Res = fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
             if (v7Res.isSuccess) {
                 v7Res
             } else {
@@ -761,7 +875,7 @@ object MikrotikSyncManager {
                 v6Res
             } else {
                 client.ensureConnected(credentials)
-                fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, onCountProgress)
+                fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
             }
         }
     }
@@ -786,34 +900,62 @@ object MikrotikSyncManager {
             val uname = (u["username"] ?: u["name"]).orEmpty().trim()
             if (uname.isBlank()) return
 
-            val actualProfile = u["actual-profile"].orEmpty().trim()
+            val actualProfileRaw = u["actual-profile"].orEmpty().trim()
+            val actualProfile = if (actualProfileRaw.equals("none", ignoreCase = true)) "" else actualProfileRaw
+            val profileFieldRaw = u["profile"].orEmpty().trim()
+            val profileField = if (profileFieldRaw.equals("none", ignoreCase = true)) "" else profileFieldRaw
             val commentProfile = u["comment"].orEmpty().trim()
                 .takeIf { it.startsWith("alkamel:", ignoreCase = true) }
                 ?.substringAfter(':')
                 ?.trim()
                 .orEmpty()
             val pkgName = actualProfile
-                .ifBlank { u["profile"].orEmpty().trim() }
+                .ifBlank { profileField }
                 .ifBlank { commentProfile }
 
-            val dlBytes = (u["download-used"]?.toLongOrNull() ?: 0L) +
-                (u["upload-used"]?.toLongOrNull() ?: 0L)
+            val dlOnlyBytes = parseRouterOsBytes(u["download-used"])
+            val ulOnlyBytes = parseRouterOsBytes(u["upload-used"])
+            val totalBytes = dlOnlyBytes + ulOnlyBytes
             val uptimeUsedRaw = u["uptime-used"].orEmpty().trim()
             val uptimeUsed = uptimeUsedRaw.ifBlank { "0s" }
             val uptimeSeconds = parseRouterOsDurationSeconds(uptimeUsedRaw)
-            val disabled = u["disabled"].equals("true", ignoreCase = true)
-            val isActive = u["active"].equals("true", ignoreCase = true)
+            val disabled = u["disabled"].equals("true", ignoreCase = true) ||
+                u["disabled"].equals("yes", ignoreCase = true)
+            val isActive = u["active"].equals("true", ignoreCase = true) ||
+                u["active"].equals("yes", ignoreCase = true)
             val lastSeen = u["last-seen"].orEmpty().trim()
             val hasLastSeen = lastSeen.isNotBlank() && !lastSeen.equals("never", ignoreCase = true)
-            val hasUsage = dlBytes > 0L || uptimeSeconds > 0L || hasLastSeen
+            val lastSeenMillis = if (hasLastSeen) parseMikrotikTimestampMillis(lastSeen) else null
+            val endTimeMillis = parseMikrotikTimestampMillis(u["end-time"] ?: u["till-time"])
+            val hasUsage = totalBytes > 0L || uptimeSeconds > 0L || hasLastSeen
 
             val limitMeta = if (pkgName.isNotBlank()) limitationsByProfile[pkgName.lowercase()] else null
-            val reachedDataLimit = limitMeta != null && limitMeta.transferLimitBytes > 0L && dlBytes >= limitMeta.transferLimitBytes
-            val reachedUptimeLimit = limitMeta != null && limitMeta.uptimeLimitSeconds > 0L && uptimeSeconds >= limitMeta.uptimeLimitSeconds
+            val reachedTransferLimit = limitMeta != null &&
+                limitMeta.transferLimitBytes > 0L &&
+                totalBytes >= (limitMeta.transferLimitBytes * 0.99).toLong()
+            val reachedDownloadLimit = limitMeta != null &&
+                limitMeta.downloadLimitBytes > 0L &&
+                dlOnlyBytes >= (limitMeta.downloadLimitBytes * 0.99).toLong()
+            val reachedUploadLimit = limitMeta != null &&
+                limitMeta.uploadLimitBytes > 0L &&
+                ulOnlyBytes >= (limitMeta.uploadLimitBytes * 0.99).toLong()
+            val reachedUptimeLimit = limitMeta != null &&
+                limitMeta.uptimeLimitSeconds > 0L &&
+                uptimeSeconds >= (limitMeta.uptimeLimitSeconds - 5L).coerceAtLeast(1L)
+            val reachedValidityLimit = limitMeta != null &&
+                limitMeta.validitySeconds > 0L &&
+                !isActive &&
+                lastSeenMillis != null &&
+                (baseNow - lastSeenMillis) >= limitMeta.validitySeconds * 1000L
+            val passedEndTime = endTimeMillis != null && endTimeMillis > 0L && endTimeMillis < baseNow
+            val explicitExpiredState = u["state"].orEmpty().trim().lowercase().let { st ->
+                st.contains("expired") || st.contains("used") || st.contains("end")
+            }
 
             val status = when {
                 disabled -> CardStatus.EXPIRED
-                reachedDataLimit || reachedUptimeLimit -> CardStatus.EXPIRED
+                passedEndTime || explicitExpiredState -> CardStatus.EXPIRED
+                reachedTransferLimit || reachedDownloadLimit || reachedUploadLimit || reachedUptimeLimit || reachedValidityLimit -> CardStatus.EXPIRED
                 actualProfile.isBlank() && hasUsage -> CardStatus.EXPIRED
                 isActive || hasUsage -> CardStatus.USED
                 else -> CardStatus.UNUSED
@@ -833,15 +975,15 @@ object MikrotikSyncManager {
                 status = status,
                 uptimeLabel = uptimeUsed,
                 uptimeMinutes = uptimeSeconds / 60L,
-                dataUsageLabel = formatBytesCompact(dlBytes),
-                dataUsageMb = dlBytes / (1024.0 * 1024.0),
+                dataUsageLabel = formatBytesCompact(totalBytes),
+                dataUsageMb = totalBytes / (1024.0 * 1024.0),
                 createdAt = baseNow - idx
             )
         }
 
         // Request only the needed User Manager attributes first (3x-4x faster for 50,000+ cards)
         val fastProplist = listOf(
-            "=.proplist=.id,username,name,password,customer,actual-profile,profile,comment,download-used,upload-used,uptime-used,disabled,active,last-seen"
+            "=.proplist=.id,username,name,password,customer,actual-profile,profile,comment,download-used,upload-used,uptime-used,disabled,active,last-seen,end-time,till-time"
         )
         var streamRes = client.executeStreaming(
             command = "/tool/user-manager/user/print",
@@ -876,6 +1018,7 @@ object MikrotikSyncManager {
         credentials: MikrotikCredentials,
         serverAccount: String,
         priceByPackage: Map<String, Double>,
+        limitationsByProfile: Map<String, ProfileLimitationMeta>,
         onCountProgress: (Int) -> Unit
     ): Result<List<CardEntity>> {
         // 1. Stream all user-profile assignments
@@ -904,7 +1047,7 @@ object MikrotikSyncManager {
             val user = s["user"].orEmpty().trim()
             if (user.isNotBlank()) {
                 val agg = sessionByUser.getOrPut(user) { UserSessionAgg() }
-                agg.totalBytes += (s["download"]?.toLongOrNull() ?: 0L) + (s["upload"]?.toLongOrNull() ?: 0L)
+                agg.totalBytes += parseRouterOsBytes(s["download"]) + parseRouterOsBytes(s["upload"])
                 val upStr = s["uptime"].orEmpty().trim()
                 agg.uptimeSeconds += parseRouterOsDurationSeconds(upStr)
                 if (upStr.isNotBlank()) agg.lastUptime = upStr
@@ -950,12 +1093,22 @@ object MikrotikSyncManager {
             val totalBytes = sessAgg?.totalBytes ?: 0L
             val uptimeSeconds = sessAgg?.uptimeSeconds ?: 0L
             val uptimeLabel = sessAgg?.lastUptime?.ifBlank { "0s" } ?: "0s"
-            val disabled = u["disabled"].equals("true", ignoreCase = true)
+            val disabled = u["disabled"].equals("true", ignoreCase = true) ||
+                u["disabled"].equals("yes", ignoreCase = true)
+
+            val limitMeta = if (pkgName.isNotBlank()) limitationsByProfile[pkgName.lowercase()] else null
+            val reachedDataLimit = limitMeta != null &&
+                limitMeta.transferLimitBytes > 0L &&
+                totalBytes >= (limitMeta.transferLimitBytes * 0.99).toLong()
+            val reachedUptimeLimit = limitMeta != null &&
+                limitMeta.uptimeLimitSeconds > 0L &&
+                uptimeSeconds >= (limitMeta.uptimeLimitSeconds - 5L).coerceAtLeast(1L)
 
             val status = when {
                 disabled -> CardStatus.EXPIRED
-                runningEntry != null || sessAgg?.isActive == true -> CardStatus.USED
                 anyUsedOrExpired -> CardStatus.EXPIRED
+                reachedDataLimit || reachedUptimeLimit -> CardStatus.EXPIRED
+                runningEntry != null || sessAgg?.isActive == true -> CardStatus.USED
                 waitingEntry != null && (sessAgg == null || sessAgg.count == 0) -> CardStatus.UNUSED
                 sessAgg != null && sessAgg.count > 0 -> CardStatus.USED
                 else -> CardStatus.UNUSED
@@ -1030,92 +1183,17 @@ object MikrotikSyncManager {
 
         val activeLiveBytes = sysStatus.totalDownloadBytes
 
-        // 1. Stream ALL User Manager payments (v6 & v7 fallback, zero limits)
-        var paymentsCount = 0
-        var payTodayAmt = 0.0; var payTodayCnt = 0
-        var payYestAmt = 0.0; var payYestCnt = 0
-        var payWeekAmt = 0.0; var payWeekCnt = 0
-        var payMonthAmt = 0.0; var payMonthCnt = 0
-        var payAllAmt = 0.0; var payAllCnt = 0
+        // 0. Fetch lightweight RouterOS VLAN / Hotspot / IP / Bridge / ARP lookup tables
+        // so every sales card displays the real connected VLAN (with physical port ONLY as fallback).
+        val vlanLookup = fetchRouterVlanLookupBestEffort(client, credentials)
 
-        val rawPaymentLogs = ArrayList<PrintSalesLogEntity>()
-        val groupedPaymentBuckets = LinkedHashMap<Pair<String, String>, PaymentBucket>()
-        var overflowPayments = false
-
-        val payPrimary = if (isV7) "/user-manager/payment/print" else "/tool/user-manager/payment/print"
-        val payFallback = if (isV7) "/tool/user-manager/payment/print" else "/user-manager/payment/print"
-
-        fun handlePaymentRecord(rec: Map<String, String>) {
-            paymentsCount++
-            val user = rec["user"].orEmpty().trim()
-            val dateRaw = rec["trans-start"] ?: rec["date"] ?: rec["trans-end"]
-            val dateKey = parseMikrotikDateKey(dateRaw) ?: todayKey
-            val parsedMillis = parseDateKeyToMillis(dateKey)
-            val pkg = resolveUserPackage(user)
-            val rawPrice = rec["price"]?.trim()?.toDoubleOrNull()
-                ?: rec["price"]?.filter { it.isDigit() || it == '.' }?.toDoubleOrNull()
-                ?: resolveUserPrice(user, pkg)
-            val cardMb = cardByUser[user]?.dataUsageMb ?: 0.0
-            val cardBytes = (cardMb * 1024.0 * 1024.0).toLong()
-
-            payAllAmt += rawPrice; payAllCnt++
-            if (dateKey == todayKey) { payTodayAmt += rawPrice; payTodayCnt++ }
-            if (dateKey == yesterdayKey) { payYestAmt += rawPrice; payYestCnt++ }
-            if (dateKey >= weekStartKey) { payWeekAmt += rawPrice; payWeekCnt++ }
-            if (dateKey >= monthStartKey) { payMonthAmt += rawPrice; payMonthCnt++ }
-
-            val bucket = groupedPaymentBuckets.getOrPut(dateKey to pkg) { PaymentBucket() }
-            bucket.count++
-            bucket.totalAmount += rawPrice
-            bucket.totalDownloadBytes += cardBytes
-            if (parsedMillis > bucket.latestMillis) bucket.latestMillis = parsedMillis
-
-            if (!overflowPayments) {
-                if (rawPaymentLogs.size < 1500) {
-                    rawPaymentLogs.add(
-                        PrintSalesLogEntity(
-                            cardUsername = user.ifBlank { "دفعة يوزر منجر" },
-                            packageName = pkg,
-                            cardsCount = 1,
-                            unitPrice = rawPrice,
-                            totalAmount = rawPrice,
-                            commissionTotal = 0.0,
-                            serverAccount = serverAccount,
-                            downloadLabel = formatBytesCompact(cardBytes),
-                            downloadMb = cardMb,
-                            printMethod = PrintMethod.PDF_A4_GRID,
-                            operationType = SaleOperationType.DIRECT_SALE,
-                            dateKey = dateKey,
-                            createdAt = parsedMillis
-                        )
-                    )
-                } else {
-                    overflowPayments = true
-                    rawPaymentLogs.clear()
-                }
-            }
-        }
-
-        client.ensureConnected(credentials)
-        val payRes = client.executeStreaming(
-            command = payPrimary,
-            params = listOf("=.proplist=user,price,trans-start,trans-end,method"),
-            timeoutMs = SESSIONS_BULK_TIMEOUT_MS
-        ) { _, rec -> handlePaymentRecord(rec) }
-        if (paymentsCount == 0 && (payRes.isFailure || payRes.getOrNull()?.isSuccess != true)) {
-            client.ensureConnected(credentials)
-            client.executeStreaming(
-                command = payFallback,
-                params = listOf("=.proplist=user,price,trans-start,trans-end,method"),
-                timeoutMs = SESSIONS_BULK_TIMEOUT_MS
-            ) { _, rec -> handlePaymentRecord(rec) }
-        }
-
-        // 2. Stream User Manager sessions with version-specific proplist (keep partial records if router DB is huge)
+        // 1. Stream User Manager sessions (with nas-port-id, user-ip, calling-station-id for VLAN resolution)
         var sessionsScanned = 0
         var todaySessionBytes = 0L
         val earliestSessionDateByUser = HashMap<String, String>(4096)
+        val earliestSessionMillisByUser = HashMap<String, Long>(4096)
         val userSessionBytes = HashMap<String, Long>(4096)
+        val userConnectionVlan = HashMap<String, String>(4096)
         val todayActiveUsers = HashSet<String>()
         val yesterdayActiveUsers = HashSet<String>()
         val weekActiveUsers = HashSet<String>()
@@ -1124,24 +1202,26 @@ object MikrotikSyncManager {
         val sessPrimary = if (isV7) "/user-manager/session/print" else "/tool/user-manager/session/print"
         val sessFallback = if (isV7) "/tool/user-manager/session/print" else "/user-manager/session/print"
         val sessProplistPrimary = if (isV7) {
-            listOf("=.proplist=user,started,ended,download,upload,active")
+            listOf("=.proplist=user,started,ended,download,upload,active,nas-port-id,user-address,calling-station-id")
         } else {
-            listOf("=.proplist=user,from-time,till-time,download,upload,active")
+            listOf("=.proplist=user,from-time,till-time,download,upload,active,nas-port-id,user-ip,calling-station-id")
         }
         val sessProplistFallback = if (isV7) {
-            listOf("=.proplist=user,from-time,till-time,download,upload,active")
+            listOf("=.proplist=user,from-time,till-time,download,upload,active,nas-port-id,user-ip,calling-station-id")
         } else {
-            listOf("=.proplist=user,started,ended,download,upload,active")
+            listOf("=.proplist=user,started,ended,download,upload,active,nas-port-id,user-address,calling-station-id")
         }
 
         fun handleSessionRecord(rec: Map<String, String>) {
             sessionsScanned++
             val user = rec["user"].orEmpty().trim()
-            val fromKey = parseMikrotikDateKey(rec["from-time"] ?: rec["started"])
-            val tillKey = parseMikrotikDateKey(rec["till-time"] ?: rec["ended"])
+            val fromRaw = rec["from-time"] ?: rec["started"]
+            val tillRaw = rec["till-time"] ?: rec["ended"]
+            val fromKey = parseMikrotikDateKey(fromRaw)
+            val tillKey = parseMikrotikDateKey(tillRaw)
             val isActive = rec["active"].equals("true", ignoreCase = true)
-            val dl = rec["download"]?.toLongOrNull() ?: 0L
-            val ul = rec["upload"]?.toLongOrNull() ?: 0L
+            val dl = parseRouterOsBytes(rec["download"])
+            val ul = parseRouterOsBytes(rec["upload"])
             val bytes = dl + ul
 
             if (isActive || fromKey == todayKey || tillKey == todayKey) {
@@ -1151,15 +1231,43 @@ object MikrotikSyncManager {
             if (user.isNotBlank()) {
                 userSessionBytes[user] = (userSessionBytes[user] ?: 0L) + bytes
                 val effectiveDate = fromKey ?: tillKey
+                val effectiveMillis = parseMikrotikTimestampMillis(fromRaw ?: tillRaw)
+                    ?: effectiveDate?.let { parseDateKeyToMillis(it) }
+                    ?: System.currentTimeMillis()
                 if (effectiveDate != null) {
                     val prev = earliestSessionDateByUser[user]
                     if (prev == null || effectiveDate < prev) {
                         earliestSessionDateByUser[user] = effectiveDate
+                        earliestSessionMillisByUser[user] = effectiveMillis
+                    } else if (effectiveDate == prev) {
+                        val prevMs = earliestSessionMillisByUser[user] ?: Long.MAX_VALUE
+                        if (effectiveMillis < prevMs) {
+                            earliestSessionMillisByUser[user] = effectiveMillis
+                        }
                     }
                     if (fromKey == todayKey || tillKey == todayKey || isActive) todayActiveUsers.add(user)
                     if (fromKey == yesterdayKey) yesterdayActiveUsers.add(user)
                     if (effectiveDate >= weekStartKey) weekActiveUsers.add(user)
                     if (effectiveDate >= monthStartKey) monthActiveUsers.add(user)
+                }
+
+                val nasPortId = rec["nas-port-id"].orEmpty().trim()
+                val userIp = (rec["user-ip"] ?: rec["user-address"] ?: rec["framed-ip-address"]).orEmpty().trim()
+                val callingMac = rec["calling-station-id"].orEmpty().trim()
+                val activeHint = vlanLookup.activeUserHint[user]
+                val resolvedVlanOrPort = resolveVlanOrPort(
+                    nasPortId = nasPortId.ifBlank { activeHint?.first.orEmpty() },
+                    userIp = userIp.ifBlank { activeHint?.second.orEmpty() },
+                    callingStationId = callingMac.ifBlank { activeHint?.third.orEmpty() },
+                    lookup = vlanLookup
+                )
+                if (resolvedVlanOrPort.isNotBlank() && resolvedVlanOrPort != "-") {
+                    val existingVlan = userConnectionVlan[user].orEmpty()
+                    val existingIsVlan = existingVlan.contains("vlan", ignoreCase = true)
+                    val candidateIsVlan = resolvedVlanOrPort.contains("vlan", ignoreCase = true)
+                    if (existingVlan.isBlank() || (!existingIsVlan && candidateIsVlan)) {
+                        userConnectionVlan[user] = resolvedVlanOrPort
+                    }
                 }
             }
         }
@@ -1179,6 +1287,99 @@ object MikrotikSyncManager {
             ) { _, rec -> handleSessionRecord(rec) }
         }
 
+        // 2. Stream User Manager payments as secondary fallback when sessions are unavailable
+        var paymentsCount = 0
+        var payTodayAmt = 0.0; var payTodayCnt = 0
+        var payYestAmt = 0.0; var payYestCnt = 0
+        var payWeekAmt = 0.0; var payWeekCnt = 0
+        var payMonthAmt = 0.0; var payMonthCnt = 0
+        var payAllAmt = 0.0; var payAllCnt = 0
+
+        val recentIndividualPaymentLogs = ArrayList<PrintSalesLogEntity>()
+        val historicalPaymentBuckets = LinkedHashMap<Pair<String, String>, PaymentBucket>()
+
+        val payPrimary = if (isV7) "/user-manager/payment/print" else "/tool/user-manager/payment/print"
+        val payFallback = if (isV7) "/tool/user-manager/payment/print" else "/user-manager/payment/print"
+
+        fun handlePaymentRecord(rec: Map<String, String>) {
+            paymentsCount++
+            val user = (rec["user"] ?: rec["user-orig"]).orEmpty().trim()
+            val dateRaw = rec["trans-start"] ?: rec["date"] ?: rec["trans-end"]
+            val dateKey = parseMikrotikDateKey(dateRaw) ?: todayKey
+            val parsedMillis = parseMikrotikTimestampMillis(dateRaw) ?: parseDateKeyToMillis(dateKey)
+            val explicitProfile = rec["profile"].orEmpty().trim()
+            val pkg = explicitProfile
+                .ifBlank { cardByUser[user]?.packageName.orEmpty().trim() }
+                .ifBlank { cardByUser[rec["user-orig"].orEmpty().trim()]?.packageName.orEmpty().trim() }
+                .ifBlank { "يوزر منجر" }
+            val parsedRouterPrice = rec["price"]?.trim()?.toDoubleOrNull()
+                ?: rec["price"]?.filter { it.isDigit() || it == '.' }?.toDoubleOrNull()
+            val rawPrice = parsedRouterPrice?.takeIf { it > 0.0 } ?: resolveUserPrice(user, pkg)
+            val cardMb = cardByUser[user]?.dataUsageMb ?: 0.0
+            val cardBytes = (cardMb * 1024.0 * 1024.0).toLong()
+            val accountLabel = rec["customer"].orEmpty().trim().ifBlank { serverAccount }
+            val activeHint = vlanLookup.activeUserHint[user]
+            val resolvedVlan = userConnectionVlan[user].orEmpty().ifBlank {
+                resolveVlanOrPort(
+                    nasPortId = activeHint?.first.orEmpty(),
+                    userIp = activeHint?.second.orEmpty(),
+                    callingStationId = activeHint?.third.orEmpty(),
+                    lookup = vlanLookup
+                )
+            }
+
+            payAllAmt += rawPrice; payAllCnt++
+            if (dateKey == todayKey) { payTodayAmt += rawPrice; payTodayCnt++ }
+            if (dateKey == yesterdayKey) { payYestAmt += rawPrice; payYestCnt++ }
+            if (dateKey >= weekStartKey) { payWeekAmt += rawPrice; payWeekCnt++ }
+            if (dateKey >= monthStartKey) { payMonthAmt += rawPrice; payMonthCnt++ }
+
+            if (dateKey >= monthStartKey && recentIndividualPaymentLogs.size < 1500) {
+                recentIndividualPaymentLogs.add(
+                    PrintSalesLogEntity(
+                        cardUsername = user.ifBlank { "دفعة يوزر منجر #$paymentsCount" },
+                        packageName = pkg,
+                        cardsCount = 1,
+                        unitPrice = rawPrice,
+                        totalAmount = rawPrice,
+                        commissionTotal = 0.0,
+                        serverAccount = accountLabel,
+                        connectionVlan = resolvedVlan,
+                        downloadLabel = formatBytesCompact(cardBytes),
+                        downloadMb = cardMb,
+                        printMethod = PrintMethod.PDF_A4_GRID,
+                        operationType = SaleOperationType.DIRECT_SALE,
+                        dateKey = dateKey,
+                        createdAt = parsedMillis
+                    )
+                )
+            } else {
+                val bucket = historicalPaymentBuckets.getOrPut(dateKey to pkg) { PaymentBucket() }
+                bucket.count++
+                bucket.totalAmount += rawPrice
+                bucket.totalDownloadBytes += cardBytes
+                if (parsedMillis > bucket.latestMillis) bucket.latestMillis = parsedMillis
+            }
+        }
+
+        if (earliestSessionDateByUser.isEmpty()) {
+            val payProplist = listOf("=.proplist=user,user-orig,customer,profile,price,trans-start,trans-end,method")
+            client.ensureConnected(credentials)
+            val payRes = client.executeStreaming(
+                command = payPrimary,
+                params = payProplist,
+                timeoutMs = SESSIONS_BULK_TIMEOUT_MS
+            ) { _, rec -> handlePaymentRecord(rec) }
+            if (paymentsCount == 0 && (payRes.isFailure || payRes.getOrNull()?.isSuccess != true)) {
+                client.ensureConnected(credentials)
+                client.executeStreaming(
+                    command = payFallback,
+                    params = payProplist,
+                    timeoutMs = SESSIONS_BULK_TIMEOUT_MS
+                ) { _, rec -> handlePaymentRecord(rec) }
+            }
+        }
+
         fun buildActivationPeriod(predicate: (String) -> Boolean, fallbackUsers: Set<String>): PeriodSalesSummary {
             val matchedUsers = earliestSessionDateByUser
                 .filterValues(predicate)
@@ -1192,7 +1393,8 @@ object MikrotikSyncManager {
             )
         }
 
-        val usePayments = payAllCnt > 0
+        val useSessionsFirst = earliestSessionDateByUser.isNotEmpty()
+        val usePayments = !useSessionsFirst && payAllCnt > 0
         val todaySales = if (usePayments) {
             PeriodSalesSummary(payTodayAmt, payTodayCnt, payTodayCnt)
         } else {
@@ -1217,76 +1419,109 @@ object MikrotikSyncManager {
         val allTimeSales: PeriodSalesSummary
         val syncedSalesLogs: List<PrintSalesLogEntity>
 
-        if (usePayments) {
-            allTimeSales = PeriodSalesSummary(payAllAmt, payAllCnt, payAllCnt)
-            syncedSalesLogs = if (!overflowPayments && rawPaymentLogs.isNotEmpty()) {
-                rawPaymentLogs
-            } else {
-                groupedPaymentBuckets.map { (key, bucket) ->
-                    val (dKey, pkg) = key
-                    val unit = if (bucket.count > 0) bucket.totalAmount / bucket.count else 0.0
-                    PrintSalesLogEntity(
-                        cardUsername = "مدفوعات يوزر منجر • $pkg (${bucket.count} كرت)",
-                        packageName = pkg,
-                        cardsCount = bucket.count,
-                        unitPrice = unit,
-                        totalAmount = bucket.totalAmount,
-                        commissionTotal = 0.0,
-                        serverAccount = serverAccount,
-                        downloadLabel = formatBytesCompact(bucket.totalDownloadBytes),
-                        downloadMb = bucket.totalDownloadBytes / (1024.0 * 1024.0),
-                        printMethod = PrintMethod.PDF_A4_GRID,
-                        operationType = SaleOperationType.DIRECT_SALE,
-                        dateKey = dKey,
-                        createdAt = bucket.latestMillis
-                    )
-                }
-            }
-        } else if (earliestSessionDateByUser.isNotEmpty()) {
-            // Group ALL activated User Manager users by (activationDate, packageName)
-            val buckets = LinkedHashMap<Pair<String, String>, SessionSalesBucket>()
+        if (useSessionsFirst) {
+            // Preserve individual sold card rows for recent 30 days (up to 3,000 most recent cards)
+            // with each card's exact username, price, package, date, and resolved VLAN (or port fallback).
+            val recentCardLogs = ArrayList<PrintSalesLogEntity>(1024)
+            val olderBuckets = LinkedHashMap<Triple<String, String, String>, SessionSalesBucket>()
             var allCardsCount = 0
             var allAmount = 0.0
 
-            earliestSessionDateByUser.forEach { (user, activationDate) ->
+            val sortedEntries = earliestSessionDateByUser.entries
+                .sortedByDescending { earliestSessionMillisByUser[it.key] ?: parseDateKeyToMillis(it.value) }
+
+            sortedEntries.forEach { (user, activationDate) ->
                 val pkg = resolveUserPackage(user)
                 val price = resolveUserPrice(user, pkg)
                 val bytes = maxOf(
                     userSessionBytes[user] ?: 0L,
                     ((cardByUser[user]?.dataUsageMb ?: 0.0) * 1024.0 * 1024.0).toLong()
                 )
+                val vlanLabel = userConnectionVlan[user].orEmpty().ifBlank { "-" }
+                val millis = earliestSessionMillisByUser[user] ?: parseDateKeyToMillis(activationDate)
+                val acct = cardByUser[user]?.serverAccount?.ifBlank { serverAccount } ?: serverAccount
+
                 allCardsCount++
                 allAmount += price
-                val b = buckets.getOrPut(activationDate to pkg) { SessionSalesBucket() }
-                b.count++
-                b.totalAmount += price
-                b.totalBytes += bytes
+
+                if (activationDate >= monthStartKey && recentCardLogs.size < 3000) {
+                    recentCardLogs.add(
+                        PrintSalesLogEntity(
+                            cardUsername = user,
+                            packageName = pkg,
+                            cardsCount = 1,
+                            unitPrice = price,
+                            totalAmount = price,
+                            commissionTotal = 0.0,
+                            serverAccount = acct,
+                            connectionVlan = vlanLabel,
+                            downloadLabel = formatBytesCompact(bytes),
+                            downloadMb = bytes / (1024.0 * 1024.0),
+                            printMethod = PrintMethod.PDF_A4_GRID,
+                            operationType = SaleOperationType.DIRECT_SALE,
+                            dateKey = activationDate,
+                            createdAt = millis
+                        )
+                    )
+                } else {
+                    val key = Triple(activationDate, pkg, vlanLabel)
+                    val b = olderBuckets.getOrPut(key) { SessionSalesBucket() }
+                    b.count++
+                    b.totalAmount += price
+                    b.totalBytes += bytes
+                    if (millis > b.latestMillis) b.latestMillis = millis
+                }
             }
 
             allTimeSales = PeriodSalesSummary(
                 totalAmount = allAmount,
                 totalCards = allCardsCount,
-                operationsCount = buckets.size
+                operationsCount = allCardsCount
             )
-            syncedSalesLogs = buckets.map { (key, b) ->
-                val (dKey, pkg) = key
+            val groupedOlderLogs = olderBuckets.map { (key, b) ->
+                val (dKey, pkg, vlan) = key
                 val unit = if (b.count > 0) b.totalAmount / b.count else 0.0
                 PrintSalesLogEntity(
-                    cardUsername = "مبيعات يوزر منجر • $pkg (${b.count} كرت)",
+                    cardUsername = "مبيعات يوزر منجر • $pkg",
                     packageName = pkg,
                     cardsCount = b.count,
                     unitPrice = unit,
                     totalAmount = b.totalAmount,
                     commissionTotal = 0.0,
                     serverAccount = serverAccount,
+                    connectionVlan = vlan,
                     downloadLabel = formatBytesCompact(b.totalBytes),
                     downloadMb = b.totalBytes / (1024.0 * 1024.0),
                     printMethod = PrintMethod.PDF_A4_GRID,
                     operationType = SaleOperationType.DIRECT_SALE,
                     dateKey = dKey,
-                    createdAt = parseDateKeyToMillis(dKey)
+                    createdAt = b.latestMillis.takeIf { it > 0L } ?: parseDateKeyToMillis(dKey)
                 )
             }
+            syncedSalesLogs = recentCardLogs + groupedOlderLogs
+        } else if (usePayments) {
+            allTimeSales = PeriodSalesSummary(payAllAmt, payAllCnt, payAllCnt)
+            val groupedOlderLogs = historicalPaymentBuckets.map { (key, bucket) ->
+                val (dKey, pkg) = key
+                val unit = if (bucket.count > 0) bucket.totalAmount / bucket.count else 0.0
+                PrintSalesLogEntity(
+                    cardUsername = "مدفوعات يوزر منجر • $pkg",
+                    packageName = pkg,
+                    cardsCount = bucket.count,
+                    unitPrice = unit,
+                    totalAmount = bucket.totalAmount,
+                    commissionTotal = 0.0,
+                    serverAccount = serverAccount,
+                    connectionVlan = "-",
+                    downloadLabel = formatBytesCompact(bucket.totalDownloadBytes),
+                    downloadMb = bucket.totalDownloadBytes / (1024.0 * 1024.0),
+                    printMethod = PrintMethod.PDF_A4_GRID,
+                    operationType = SaleOperationType.DIRECT_SALE,
+                    dateKey = dKey,
+                    createdAt = bucket.latestMillis
+                )
+            }
+            syncedSalesLogs = recentIndividualPaymentLogs + groupedOlderLogs
         } else {
             // Router cleared old sessions & has no payments: derive all-time consumed sales from USED + EXPIRED cards
             val consumedCards = cards.filter { it.status != CardStatus.UNUSED }
@@ -1300,7 +1535,7 @@ object MikrotikSyncManager {
                 val sumMb = pkgCards.sumOf { it.dataUsageMb }
                 totalAmt += sumAmt
                 PrintSalesLogEntity(
-                    cardUsername = "كروت مستهلكة • $pkg (${pkgCards.size} كرت)",
+                    cardUsername = "كروت مستهلكة • $pkg",
                     packageName = pkg,
                     cardsCount = pkgCards.size,
                     unitPrice = unit,
@@ -1318,7 +1553,7 @@ object MikrotikSyncManager {
             allTimeSales = PeriodSalesSummary(
                 totalAmount = totalAmt,
                 totalCards = consumedCards.size,
-                operationsCount = syncedSalesLogs.size
+                operationsCount = consumedCards.size
             )
         }
 
@@ -1502,10 +1737,42 @@ object MikrotikSyncManager {
         return removeRes?.isSuccess == true
     }
 
+    /**
+     * Parses MikroTik byte values in both raw integer form (`2418016256`) and unit-suffixed form
+     * (`1200M`, `2306MiB`, `2G`, `500K`, `0B`). Returns 0L for blank/unlimited values.
+     */
+    fun parseRouterOsBytes(raw: String?): Long {
+        if (raw.isNullOrBlank()) return 0L
+        val clean = raw.trim()
+        if (clean.equals("unlimited", ignoreCase = true) || clean.equals("none", ignoreCase = true)) {
+            return 0L
+        }
+        clean.toLongOrNull()?.let { return it.coerceAtLeast(0L) }
+        val match = BYTE_SIZE_REGEX.matchEntire(clean) ?: return 0L
+        val number = match.groupValues[1].toDoubleOrNull() ?: return 0L
+        val unit = match.groupValues[2].lowercase(Locale.US)
+        val multiplier = when (unit) {
+            "k", "kb", "kib" -> 1024.0
+            "m", "mb", "mib" -> 1024.0 * 1024.0
+            "g", "gb", "gib" -> 1024.0 * 1024.0 * 1024.0
+            "t", "tb", "tib" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
+            else -> 1.0
+        }
+        return (number * multiplier).toLong().coerceAtLeast(0L)
+    }
+
+    /**
+     * Parses MikroTik RouterOS durations in BOTH shorthand (`1w2d6h24m7s`, `13h38m`)
+     * AND colon-separated formats (`12:00:00`, `1d 06:24:07`, `00:30:00`).
+     */
     fun parseRouterOsDurationSeconds(raw: String?): Long {
         if (raw.isNullOrBlank()) return 0L
+        val clean = raw.trim()
+        if (clean.equals("unlimited", ignoreCase = true) || clean.equals("none", ignoreCase = true)) {
+            return 0L
+        }
         var total = 0L
-        DURATION_TOKEN_REGEX.findAll(raw.trim()).forEach { match ->
+        DURATION_TOKEN_REGEX.findAll(clean).forEach { match ->
             val value = match.groupValues[1].toLongOrNull() ?: 0L
             when (match.groupValues[2].lowercase(Locale.US)) {
                 "w" -> total += value * 7L * 86400L
@@ -1513,6 +1780,17 @@ object MikrotikSyncManager {
                 "h" -> total += value * 3600L
                 "m" -> total += value * 60L
                 "s" -> total += value
+            }
+        }
+        COLON_TIME_REGEX.find(clean)?.let { cm ->
+            val p1 = cm.groupValues[1].toLongOrNull() ?: 0L
+            val p2 = cm.groupValues[2].toLongOrNull() ?: 0L
+            val p3Raw = cm.groupValues.getOrNull(3).orEmpty()
+            if (p3Raw.isNotBlank()) {
+                val p3 = p3Raw.toLongOrNull() ?: 0L
+                total += p1 * 3600L + p2 * 60L + p3
+            } else {
+                total += p1 * 60L + p2
             }
         }
         return total
@@ -1536,6 +1814,27 @@ object MikrotikSyncManager {
         return null
     }
 
+    fun parseMikrotikTimestampMillis(raw: String?): Long? {
+        if (raw.isNullOrBlank()) return null
+        val clean = raw.trim()
+        if (clean.equals("never", ignoreCase = true) || clean.equals("none", ignoreCase = true)) {
+            return null
+        }
+        val dateKey = parseMikrotikDateKey(clean) ?: return null
+        val timePart = clean.substringAfter(' ', missingDelimiterValue = "").trim()
+        val pattern = if (timePart.length >= 8 && timePart[2] == ':' && timePart[5] == ':') {
+            "yyyy-MM-dd HH:mm:ss"
+        } else {
+            "yyyy-MM-dd"
+        }
+        val input = if (pattern.contains("HH")) "$dateKey ${timePart.substring(0, 8)}" else dateKey
+        return runCatching {
+            SimpleDateFormat(pattern, Locale.US).apply {
+                timeZone = TimeZone.getDefault()
+            }.parse(input)?.time
+        }.getOrNull()
+    }
+
     private fun parseDateKeyToMillis(dateKey: String): Long {
         return runCatching {
             val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
@@ -1548,6 +1847,271 @@ object MikrotikSyncManager {
     fun inferPriceFromPackageName(packageName: String): Double {
         val match = CURRENCY_SUFFIX_REGEX.find(packageName) ?: return 0.0
         return match.groupValues.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+    }
+
+    /**
+     * Fetches lightweight MikroTik RouterOS VLAN, Hotspot server, IP subnet, Bridge Host, and ARP tables
+     * so every sold card resolves to its connected VLAN name/ID (with physical port ONLY as fallback).
+     */
+    private suspend fun fetchRouterVlanLookupBestEffort(
+        client: MikrotikApiClient,
+        credentials: MikrotikCredentials
+    ): RouterVlanLookup {
+        val vlanByName = HashMap<String, String>()
+        val vlanById = HashMap<String, String>()
+        val vlansByParent = HashMap<String, MutableList<String>>()
+        val ifaceByHotspotServer = HashMap<String, String>()
+        val vlanIdByMac = HashMap<String, String>()
+        val ifaceByMac = HashMap<String, String>()
+        val ifaceByIp = HashMap<String, String>()
+        val activeUserHint = HashMap<String, Triple<String, String, String>>()
+        val subnets = ArrayList<RouterCidrInterface>()
+
+        // 1. /interface/vlan/print
+        runCatching {
+            client.ensureConnected(credentials)
+            val res = client.execute(
+                "/interface/vlan/print",
+                listOf("=.proplist=name,vlan-id,interface"),
+                timeoutMs = 8_000
+            ).getOrNull()
+            res?.takeIf { it.isSuccess }?.records?.forEach { r ->
+                val name = r["name"].orEmpty().trim()
+                val vid = r["vlan-id"].orEmpty().trim()
+                val parent = r["interface"].orEmpty().trim().lowercase()
+                if (name.isBlank() && vid.isBlank()) return@forEach
+                val displayLabel = formatVlanDisplayLabel(name, vid)
+                if (name.isNotBlank()) vlanByName[name.lowercase()] = displayLabel
+                if (vid.isNotBlank()) vlanById[vid] = displayLabel
+                if (parent.isNotBlank()) {
+                    val list = vlansByParent.getOrPut(parent) { ArrayList() }
+                    if (displayLabel !in list) list.add(displayLabel)
+                }
+            }
+        }
+
+        // 2. /ip/hotspot/print (maps hotspot server name -> interface)
+        runCatching {
+            client.ensureConnected(credentials)
+            val res = client.execute(
+                "/ip/hotspot/print",
+                listOf("=.proplist=name,interface"),
+                timeoutMs = 6_000
+            ).getOrNull()
+            res?.takeIf { it.isSuccess }?.records?.forEach { r ->
+                val srv = r["name"].orEmpty().trim().lowercase()
+                val iface = r["interface"].orEmpty().trim().lowercase()
+                if (srv.isNotBlank() && iface.isNotBlank()) {
+                    ifaceByHotspotServer[srv] = iface
+                }
+            }
+        }
+
+        // 3. /ip/address/print (maps IPv4 CIDR subnet -> interface)
+        runCatching {
+            client.ensureConnected(credentials)
+            val res = client.execute(
+                "/ip/address/print",
+                listOf("=.proplist=address,interface"),
+                timeoutMs = 6_000
+            ).getOrNull()
+            res?.takeIf { it.isSuccess }?.records?.forEach { r ->
+                val addr = r["address"].orEmpty().trim()
+                val iface = r["interface"].orEmpty().trim().lowercase()
+                if (addr.isNotBlank() && iface.isNotBlank()) {
+                    parseIpv4Cidr(addr, iface)?.let { subnets.add(it) }
+                }
+            }
+            subnets.sortByDescending { it.prefixLength }
+        }
+
+        // 4. /interface/bridge/host/print (maps client MAC -> bridge VLAN ID & interface)
+        runCatching {
+            client.ensureConnected(credentials)
+            client.executeStreaming(
+                "/interface/bridge/host/print",
+                listOf("=.proplist=mac-address,on-interface,vid"),
+                timeoutMs = 6_000
+            ) { _, r ->
+                val mac = r["mac-address"].orEmpty().trim().lowercase()
+                if (mac.isBlank()) return@executeStreaming
+                val vid = r["vid"].orEmpty().trim()
+                val onIface = r["on-interface"].orEmpty().trim().lowercase()
+                if (vid.isNotBlank() && vid != "0" && vid != "1") {
+                    vlanIdByMac[mac] = vid
+                } else if (vid == "1" && vlanById.containsKey("1")) {
+                    vlanIdByMac[mac] = vid
+                }
+                if (onIface.isNotBlank()) {
+                    ifaceByMac[mac] = onIface
+                }
+            }
+        }
+
+        // 5. /ip/arp/print (maps client IP & MAC -> interface, e.g. vlan10)
+        runCatching {
+            client.ensureConnected(credentials)
+            client.executeStreaming(
+                "/ip/arp/print",
+                listOf("=.proplist=address,mac-address,interface"),
+                timeoutMs = 6_000
+            ) { _, r ->
+                val ip = r["address"].orEmpty().trim()
+                val mac = r["mac-address"].orEmpty().trim().lowercase()
+                val iface = r["interface"].orEmpty().trim().lowercase()
+                if (iface.isBlank()) return@executeStreaming
+                if (ip.isNotBlank()) ifaceByIp[ip] = iface
+                if (mac.isNotBlank() && (!ifaceByMac.containsKey(mac) || vlanByName.containsKey(iface))) {
+                    ifaceByMac[mac] = iface
+                }
+            }
+        }
+
+        // 6. /ip/hotspot/active/print (active user -> server/ip/mac hints)
+        runCatching {
+            client.ensureConnected(credentials)
+            client.executeStreaming(
+                "/ip/hotspot/active/print",
+                listOf("=.proplist=user,server,address,mac-address"),
+                timeoutMs = 6_000
+            ) { _, r ->
+                val u = r["user"].orEmpty().trim()
+                if (u.isNotBlank()) {
+                    activeUserHint[u] = Triple(
+                        r["server"].orEmpty().trim(),
+                        r["address"].orEmpty().trim(),
+                        r["mac-address"].orEmpty().trim()
+                    )
+                }
+            }
+        }
+
+        client.ensureConnected(credentials)
+        return RouterVlanLookup(
+            vlanByInterfaceName = vlanByName,
+            vlanById = vlanById,
+            vlansByParentInterface = vlansByParent,
+            interfaceByHotspotServer = ifaceByHotspotServer,
+            vlanIdByMac = vlanIdByMac,
+            interfaceByMac = ifaceByMac,
+            interfaceByIp = ifaceByIp,
+            activeUserHint = activeUserHint,
+            subnets = subnets
+        )
+    }
+
+    private fun formatVlanDisplayLabel(name: String, vlanId: String): String {
+        val cleanName = name.trim()
+        val cleanVid = vlanId.trim()
+        return when {
+            cleanName.isNotBlank() && cleanVid.isNotBlank() -> {
+                if (cleanName.contains(cleanVid, ignoreCase = true) && cleanName.contains("vlan", ignoreCase = true)) {
+                    cleanName
+                } else {
+                    "$cleanName (VLAN $cleanVid)"
+                }
+            }
+            cleanName.isNotBlank() -> cleanName
+            cleanVid.isNotBlank() -> "VLAN $cleanVid"
+            else -> "-"
+        }
+    }
+
+    /**
+     * Resolves the connected VLAN name/ID for a User Manager session/sale record.
+     * Falls back to the physical port (e.g. ether7) ONLY when no VLAN exists for the record.
+     */
+    internal fun resolveVlanOrPort(
+        nasPortId: String,
+        userIp: String,
+        callingStationId: String,
+        lookup: RouterVlanLookup
+    ): String {
+        val cleanNas = nasPortId.trim()
+        val cleanIp = userIp.trim()
+        val cleanMac = callingStationId.trim().lowercase()
+
+        fun interfaceToVlan(ifaceRaw: String?): String? {
+            val raw = ifaceRaw?.trim().orEmpty()
+            if (raw.isBlank()) return null
+            val key = raw.lowercase()
+            lookup.vlanByInterfaceName[key]?.let { return it }
+            lookup.interfaceByHotspotServer[key]?.let { mapped ->
+                lookup.vlanByInterfaceName[mapped]?.let { return it }
+                if (mapped.contains("vlan", ignoreCase = true)) return mapped
+            }
+            if (key.contains("vlan")) return raw
+            return null
+        }
+
+        // 1. Direct nas-port-id is a VLAN or Hotspot server bound to a VLAN
+        interfaceToVlan(cleanNas)?.let { return it }
+
+        // 2. Client MAC has an explicit Bridge VLAN ID (vid)
+        if (cleanMac.isNotBlank()) {
+            lookup.vlanIdByMac[cleanMac]?.let { vid ->
+                return lookup.vlanById[vid] ?: "VLAN $vid"
+            }
+            // 3. Client MAC in ARP / Bridge maps to a VLAN interface
+            interfaceToVlan(lookup.interfaceByMac[cleanMac])?.let { return it }
+        }
+
+        // 4. Client IP in ARP maps to a VLAN interface
+        if (cleanIp.isNotBlank()) {
+            interfaceToVlan(lookup.interfaceByIp[cleanIp])?.let { return it }
+            // 5. Client IP matches a RouterOS /ip/address subnet bound to a VLAN interface
+            val ipInt = parseIpv4ToInt(cleanIp)
+            if (ipInt != null) {
+                for (subnet in lookup.subnets) {
+                    if ((ipInt and subnet.maskInt) == subnet.networkInt) {
+                        interfaceToVlan(subnet.interfaceName)?.let { return it }
+                    }
+                }
+            }
+        }
+
+        // 6. Physical port (or Hotspot server's parent port) hosts VLAN(s) in /interface/vlan/print
+        val physicalPort = (lookup.interfaceByHotspotServer[cleanNas.lowercase()] ?: cleanNas.lowercase())
+            .ifBlank { lookup.interfaceByIp[cleanIp].orEmpty() }
+            .ifBlank { lookup.interfaceByMac[cleanMac].orEmpty() }
+        if (physicalPort.isNotBlank()) {
+            val portVlans = lookup.vlansByParentInterface[physicalPort]
+            if (!portVlans.isNullOrEmpty()) {
+                return if (portVlans.size == 1) portVlans.first() else portVlans.take(2).joinToString(" / ")
+            }
+        }
+
+        // 7. Fallback ONLY when no VLAN exists for this record: physical port name
+        return cleanNas
+            .ifBlank { lookup.interfaceByIp[cleanIp].orEmpty() }
+            .ifBlank { lookup.interfaceByMac[cleanMac].orEmpty() }
+            .ifBlank { "-" }
+    }
+
+    internal fun parseIpv4Cidr(cidr: String, interfaceName: String): RouterCidrInterface? {
+        val parts = cidr.trim().split('/')
+        if (parts.size != 2) return null
+        val ipInt = parseIpv4ToInt(parts[0]) ?: return null
+        val prefix = parts[1].toIntOrNull()?.takeIf { it in 1..32 } ?: return null
+        val maskInt = if (prefix == 32) -1 else (-1 shl (32 - prefix))
+        return RouterCidrInterface(
+            networkInt = ipInt and maskInt,
+            maskInt = maskInt,
+            prefixLength = prefix,
+            interfaceName = interfaceName.trim().lowercase()
+        )
+    }
+
+    private fun parseIpv4ToInt(ip: String): Int? {
+        val octets = ip.trim().split('.')
+        if (octets.size != 4) return null
+        var acc = 0
+        for (part in octets) {
+            val v = part.toIntOrNull() ?: return null
+            if (v !in 0..255) return null
+            acc = (acc shl 8) or v
+        }
+        return acc
     }
 
     fun formatBytesCompact(bytes: Long): String {
