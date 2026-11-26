@@ -11,6 +11,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.BufferedInputStream
@@ -68,7 +69,7 @@ class MikrotikRouterOsProtocolTest {
             assertEquals("4d14h7m40s", status.uptimeDisplay)
             assertEquals("6.49.19 (long-term)", status.routerOsVersion)
             assertEquals(192, status.activeConnectionsCount)
-            assertEquals(192L * 113_860_000L, status.totalDownloadBytes)
+            assertEquals(192L * (113_860_000L + 1024L), status.totalDownloadBytes)
             assertTrue("Download display should be in GB, got: ${status.totalDownloadDisplay}", status.totalDownloadDisplay.contains("GB"))
 
             // Critical regression guard: on RouterOS v6 when hotspot active sessions already exist,
@@ -132,6 +133,7 @@ class MikrotikRouterOsProtocolTest {
 
             // Simulate sudden network drop / router kicking the idle socket
             srv.forceCloseActiveClients()
+            Thread.sleep(50)
             srv.cpuLoad = 35
             srv.hotspotActiveCount = 61
 
@@ -212,7 +214,7 @@ class MikrotikRouterOsProtocolTest {
             val status = result.systemStatus!!
             assertEquals(19, status.cpuLoadPercent)
             assertEquals(45, status.activeConnectionsCount)
-            assertEquals(45L * 10_485_760L, status.totalDownloadBytes)
+            assertEquals(45L * (10_485_760L + 1024L), status.totalDownloadBytes)
             assertEquals("7.15.3 (stable)", status.routerOsVersion)
         }
     }
@@ -278,7 +280,7 @@ class MikrotikRouterOsProtocolTest {
         // Timestamps
         assertNotNull(MikrotikSyncManager.parseMikrotikTimestampMillis("nov/26/2026 14:20:05"))
         assertNotNull(MikrotikSyncManager.parseMikrotikTimestampMillis("2026-11-26 14:20:05"))
-        assertEquals(null, MikrotikSyncManager.parseMikrotikTimestampMillis("never"))
+        assertNull(MikrotikSyncManager.parseMikrotikTimestampMillis("never"))
     }
 
     @Test

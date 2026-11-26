@@ -145,7 +145,7 @@ object PdfPrintEngine {
                 c.drawText("رقم الكرت / العملية", reportW - 54f, y + 30f, headTxt)
                 c.drawText("الباقة", reportW - 350f, y + 30f, headTxt)
                 c.drawText("السعر", reportW - 520f, y + 30f, headTxt)
-                c.drawText("الحساب", reportW - 680f, y + 30f, headTxt)
+                c.drawText("VLAN", reportW - 680f, y + 30f, headTxt)
                 c.drawText("التحميل", reportW - 840f, y + 30f, headTxt)
                 c.drawText("التاريخ", reportW - 1010f, y + 30f, headTxt)
                 y += 48f
@@ -156,10 +156,11 @@ object PdfPrintEngine {
                 } else {
                     slice.forEach { log ->
                         val rowY = y + 30f
+                        val vlanOrFallback = log.connectionVlan.ifBlank { log.serverAccount.ifBlank { "-" } }
                         c.drawText(log.cardUsername.take(18), reportW - 54f, rowY, cellTxt)
                         c.drawText(log.packageName.take(12), reportW - 350f, rowY, cellTxt)
                         c.drawText("${log.totalAmount.toLong()}", reportW - 520f, rowY, cellTxt)
-                        c.drawText(log.serverAccount.ifBlank { "-" }.take(10), reportW - 680f, rowY, cellTxt)
+                        c.drawText(vlanOrFallback.take(14), reportW - 680f, rowY, cellTxt)
                         c.drawText(log.downloadLabel.ifBlank { "0 MB" }.take(10), reportW - 840f, rowY, cellTxt)
                         c.drawText(df.format(Date(log.createdAt)), reportW - 1010f, rowY, cellTxt)
                         y += 44f

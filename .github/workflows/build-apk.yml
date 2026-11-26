@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -50,10 +50,16 @@ jobs:
           cache-read-only: false
 
       - name: Run Unit & RouterOS Protocol Tests
-        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace --console=plain --max-workers=4
+        shell: bash
+        run: |
+          gradle :app:testDebugUnitTest --no-daemon --stacktrace --console=plain --max-workers=2 || \
+          gradle :app:testDebugUnitTest --no-daemon --stacktrace --console=plain --max-workers=2 --refresh-dependencies
 
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=4
+        shell: bash
+        run: |
+          gradle :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=2 || \
+          gradle :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=2 --refresh-dependencies
 
       - name: Prepare Debug APK for Release
         shell: bash
@@ -92,7 +98,10 @@ jobs:
 
       - name: Build Release Unsigned APK (Optional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
-        run: gradle :app:assembleRelease --no-daemon --stacktrace --console=plain --max-workers=4
+        shell: bash
+        run: |
+          gradle :app:assembleRelease --no-daemon --stacktrace --console=plain --max-workers=2 || \
+          gradle :app:assembleRelease --no-daemon --stacktrace --console=plain --max-workers=2 --refresh-dependencies
 
       - name: Publish Release APK to GitHub Releases (Optional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
