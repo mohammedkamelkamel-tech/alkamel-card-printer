@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Assessment
 import androidx.compose.material.icons.rounded.CreditCard
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Leaderboard
 import androidx.compose.material.icons.rounded.MonetizationOn
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PersonOff
@@ -120,6 +121,7 @@ fun DashboardScreen(
         state.packagesCount,
         state.totalSalesAmount,
         state.totalSalesCardsCount,
+        state.topSellingPackageName,
         ext
     ) {
         listOf(
@@ -154,6 +156,17 @@ fun DashboardScreen(
                 icon = Icons.Rounded.MonetizationOn,
                 accentColor = ext.reportTeal,
                 route = AppRoutes.SALES
+            ),
+            DashboardTile(
+                title = "الأكثر مبيعات",
+                subtitle = if (state.topSellingPackageName.isNotBlank()) {
+                    "الأعلى: ${state.topSellingPackageName} • الفيلانات"
+                } else {
+                    "الفئات يومياً والفيلانات استهلاكاً"
+                },
+                icon = Icons.Rounded.Leaderboard,
+                accentColor = Color(0xFFF59E0B),
+                route = AppRoutes.TOP_SALES
             ),
             DashboardTile(
                 title = "الكروت المنتهية",
@@ -481,6 +494,15 @@ fun DashboardScreen(
                     modifier = Modifier.clickable {
                         showQuickActionsSheet = false
                         viewModel.refreshMikrotikNow()
+                    }
+                )
+                ListItem(
+                    headlineContent = { Text("الأكثر مبيعات واستهلاك الفيلانات", fontWeight = FontWeight.Bold) },
+                    supportingContent = { Text("عرض الفئات الأكثر مبيعاً يومياً والفيلانات الأكثر استهلاكاً للبيانات") },
+                    leadingContent = { Icon(Icons.Rounded.Leaderboard, contentDescription = null, tint = Color(0xFFF59E0B)) },
+                    modifier = Modifier.clickable {
+                        showQuickActionsSheet = false
+                        onNavigate(AppRoutes.TOP_SALES)
                     }
                 )
                 ListItem(

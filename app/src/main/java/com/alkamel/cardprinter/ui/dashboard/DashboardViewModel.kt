@@ -41,6 +41,7 @@ data class DashboardUiState(
     val packagesCount: Int = 0,
     val totalSalesAmount: Double = 0.0,
     val totalSalesCardsCount: Int = 0,
+    val topSellingPackageName: String = "",
     val showFastSessionPrompt: Boolean = false,
     val isLoadingSessions: Boolean = false,
     val isSyncBarVisible: Boolean = false,
@@ -102,6 +103,7 @@ class DashboardViewModel(
                         packagesCount = bundle.packagesCount,
                         totalSalesAmount = bundle.salesReport.allTime.totalAmount,
                         totalSalesCardsCount = bundle.salesReport.allTime.totalCards,
+                        topSellingPackageName = bundle.salesReport.topSellingPackage?.packageName.orEmpty(),
                         showFastSessionPrompt = current.showFastSessionPrompt ||
                             (connected && session?.shouldPromptFastSessionLoad == true)
                     )

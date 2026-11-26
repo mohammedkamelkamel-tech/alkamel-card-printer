@@ -38,6 +38,8 @@ import com.alkamel.cardprinter.ui.settings.AppLockScreen
 import com.alkamel.cardprinter.ui.settings.AppSettingsScreen
 import com.alkamel.cardprinter.ui.settings.AppSettingsViewModel
 import com.alkamel.cardprinter.ui.splash.SplashScreen
+import com.alkamel.cardprinter.ui.topsales.TopSalesScreen
+import com.alkamel.cardprinter.ui.topsales.TopSalesViewModel
 
 @Composable
 fun AppNavGraph() {
@@ -122,6 +124,14 @@ fun AppNavGraph() {
         composable(AppRoutes.SALES) {
             val vm: SalesViewModel = viewModel(factory = factory)
             SalesScreen(
+                viewModel = vm,
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(AppRoutes.TOP_SALES) {
+            val vm: TopSalesViewModel = viewModel(factory = factory)
+            TopSalesScreen(
                 viewModel = vm,
                 onNavigateBack = { navController.popBackStack() }
             )

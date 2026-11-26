@@ -8,6 +8,7 @@ object AppRoutes {
     const val CARD_GENERATION = "card_generation"
     const val CARD_DESIGNER = "card_designer"
     const val SALES = "sales"
+    const val TOP_SALES = "top_sales"
     const val REPORTS = "reports"
     const val EXPIRED_CARDS = "expired_cards"
     const val PACKAGES = "packages"

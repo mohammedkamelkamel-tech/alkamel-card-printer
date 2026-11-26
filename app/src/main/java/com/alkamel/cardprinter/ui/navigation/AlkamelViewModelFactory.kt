@@ -14,6 +14,7 @@ import com.alkamel.cardprinter.ui.printpreview.PrintPreviewViewModel
 import com.alkamel.cardprinter.ui.reports.ReportsViewModel
 import com.alkamel.cardprinter.ui.sales.SalesViewModel
 import com.alkamel.cardprinter.ui.settings.AppSettingsViewModel
+import com.alkamel.cardprinter.ui.topsales.TopSalesViewModel
 
 class AlkamelViewModelFactory(
     private val app: AlkamelCardPrinterApplication
@@ -34,6 +35,8 @@ class AlkamelViewModelFactory(
                 CardDesignerViewModel(app.repository) as T
             modelClass.isAssignableFrom(SalesViewModel::class.java) ->
                 SalesViewModel(app.repository) as T
+            modelClass.isAssignableFrom(TopSalesViewModel::class.java) ->
+                TopSalesViewModel(app.repository) as T
             modelClass.isAssignableFrom(ReportsViewModel::class.java) ->
                 ReportsViewModel(app.repository) as T
             modelClass.isAssignableFrom(ExpiredCardsViewModel::class.java) ->
