@@ -396,6 +396,69 @@ class MikrotikRouterOsProtocolTest {
         )
     }
 
+    @Test
+    fun testV6ProplistTrapRetriesWithoutProplistAndNeverCallsV7Prefix() = runBlocking {
+        val seenCommands = CopyOnWriteArrayList<String>()
+        val server = EmbeddedRouterOsServer(
+            expectedUser = "admin",
+            expectedPass = "pass",
+            routerOsVersion = "6.49.19 (long-term)",
+            userManagerCardsCount = 120,
+            rejectV6Proplist = true,
+            rejectV7PrefixWithNoSuchCommandPrefix = true,
+            onCommand = { seenCommands.add(it) }
+        )
+
+        server.use { srv ->
+            val creds = MikrotikCredentials("127.0.0.1", srv.port, "admin", "pass")
+            val client = MikrotikApiClient(connectTimeoutMs = 3000, readTimeoutMs = 10000)
+            client.use { api ->
+                assertTrue(api.connectAndLogin(creds).isSuccess)
+                val cardsRes = MikrotikSyncManager.fetchAllUserManagerCardsStreaming(
+                    client = api,
+                    credentials = creds,
+                    isV7 = false,
+                    serverAccount = "admin",
+                    priceByPackage = mapOf("200" to 200.0),
+                    limitationsByProfile = emptyMap(),
+                    onCountProgress = {}
+                )
+                assertTrue("Expected v6 cards fetch to succeed via no-proplist retry, got: ${cardsRes.exceptionOrNull()}", cardsRes.isSuccess)
+                assertEquals(120, cardsRes.getOrThrow().size)
+                assertFalse(
+                    "RouterOS v6 must NEVER call v7 /user-manager/user/print (causes 'no such command prefix')",
+                    seenCommands.any { it.startsWith("/user-manager/") }
+                )
+            }
+        }
+    }
+
+    @Test
+    fun testAmbiguousVersionAutoDetectsCorrectUserManagerPrefix() = runBlocking {
+        val server = EmbeddedRouterOsServer(
+            expectedUser = "admin",
+            expectedPass = "pass",
+            routerOsVersion = "", // Ambiguous/missing version string
+            rejectV6PrefixWithNoSuchCommandPrefix = true,
+            v7ProfilesCount = 26
+        )
+
+        server.use { srv ->
+            val creds = MikrotikCredentials("127.0.0.1", srv.port, "admin", "pass")
+            val client = MikrotikApiClient(connectTimeoutMs = 3000, readTimeoutMs = 10000)
+            client.use { api ->
+                assertTrue(api.connectAndLogin(creds).isSuccess)
+                val (detectedV7, profiles) = MikrotikSyncManager.fetchRawProfileRecordsWithDetectedMode(
+                    client = api,
+                    credentials = creds,
+                    guessedIsV7 = false
+                )
+                assertTrue("Expected auto-detection of RouterOS v7 /user-manager prefix", detectedV7)
+                assertEquals(26, profiles.size)
+            }
+        }
+    }
+
     /**
      * Minimal pure-JVM embedded RouterOS Binary API server for deterministic unit testing.
      */
@@ -411,6 +474,10 @@ class MikrotikRouterOsProtocolTest {
         private val v7ActiveSessionsCount: Int = 0,
         private val v7DownloadBytesPerSession: Long = 0L,
         private val userManagerCardsCount: Int = 0,
+        private val v7ProfilesCount: Int = 0,
+        private val rejectV6Proplist: Boolean = false,
+        private val rejectV7PrefixWithNoSuchCommandPrefix: Boolean = false,
+        private val rejectV6PrefixWithNoSuchCommandPrefix: Boolean = false,
         private val stallCommand: String? = null,
         private val stallDelayMs: Long = 0L,
         private val onCommand: (String) -> Unit = {}
@@ -495,6 +562,17 @@ class MikrotikRouterOsProtocolTest {
                         Thread.sleep(stallDelayMs)
                     }
 
+                    if (rejectV7PrefixWithNoSuchCommandPrefix && cmd.startsWith("/user-manager/")) {
+                        writeSentence(out, listOf("!trap", "=message=no such command prefix"))
+                        writeSentence(out, listOf("!done"))
+                        continue
+                    }
+                    if (rejectV6PrefixWithNoSuchCommandPrefix && cmd.startsWith("/tool/user-manager/")) {
+                        writeSentence(out, listOf("!trap", "=message=no such command prefix"))
+                        writeSentence(out, listOf("!done"))
+                        continue
+                    }
+
                     when (cmd) {
                         "/system/resource/print" -> {
                             writeSentence(
@@ -526,6 +604,20 @@ class MikrotikRouterOsProtocolTest {
                         "/ppp/active/print" -> {
                             writeSentence(out, listOf("!done"))
                         }
+                        "/user-manager/profile/print" -> {
+                            for (i in 1..v7ProfilesCount) {
+                                writeSentence(
+                                    out,
+                                    listOf(
+                                        "!re",
+                                        "=.id=*$i",
+                                        "=name=pkg-$i",
+                                        "=price=100"
+                                    )
+                                )
+                            }
+                            writeSentence(out, listOf("!done"))
+                        }
                         "/user-manager/session/print" -> {
                             for (i in 1..v7ActiveSessionsCount) {
                                 writeSentence(
@@ -542,20 +634,25 @@ class MikrotikRouterOsProtocolTest {
                             writeSentence(out, listOf("!done"))
                         }
                         "/tool/user-manager/user/print" -> {
-                            for (i in 1..userManagerCardsCount) {
-                                val num = String.format(Locale.US, "%04d", i)
-                                writeSentence(
-                                    out,
-                                    listOf(
-                                        "!re",
-                                        "=.id=*$i",
-                                        "=username=card-$num",
-                                        "=password=pass-$num",
-                                        "=actual-profile=200"
+                            if (rejectV6Proplist && attrs.containsKey(".proplist")) {
+                                writeSentence(out, listOf("!trap", "=message=invalid proplist"))
+                                writeSentence(out, listOf("!done"))
+                            } else {
+                                for (i in 1..userManagerCardsCount) {
+                                    val num = String.format(Locale.US, "%04d", i)
+                                    writeSentence(
+                                        out,
+                                        listOf(
+                                            "!re",
+                                            "=.id=*$i",
+                                            "=username=card-$num",
+                                            "=password=pass-$num",
+                                            "=actual-profile=200"
+                                        )
                                     )
-                                )
+                                }
+                                writeSentence(out, listOf("!done"))
                             }
-                            writeSentence(out, listOf("!done"))
                         }
                         else -> {
                             writeSentence(out, listOf("!done"))

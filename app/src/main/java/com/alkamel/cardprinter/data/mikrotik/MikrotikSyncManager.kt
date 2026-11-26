@@ -32,10 +32,18 @@ import java.util.TimeZone
  */
 object MikrotikSyncManager {
 
-    private const val STREAM_BULK_TIMEOUT_MS = 120_000
-    private const val SESSIONS_BULK_TIMEOUT_MS = 60_000
+    private const val STREAM_BULK_TIMEOUT_MS = 240_000
+    private const val SESSIONS_BULK_TIMEOUT_MS = 120_000
     private const val TELEMETRY_TIMEOUT_MS = 8_000
     private const val ACTIVE_QUERY_TIMEOUT_MS = 6_000
+
+    internal fun isNoSuchCommandPrefixError(message: String?): Boolean {
+        if (message.isNullOrBlank()) return false
+        val lower = message.lowercase(Locale.US)
+        return lower.contains("no such command prefix") ||
+            lower.contains("no such command") ||
+            lower.contains("bad command name")
+    }
 
     private val telemetryMutex = Mutex()
     private val telemetryClient = MikrotikApiClient(
@@ -58,7 +66,7 @@ object MikrotikSyncManager {
     private val COLON_TIME_REGEX = Regex("""(?:^|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?""")
     private val BYTE_SIZE_REGEX = Regex("""^\s*(\d+(?:\.\d+)?)\s*(tib|tb|t|gib|gb|g|mib|mb|m|kib|kb|k|b)?\s*$""", RegexOption.IGNORE_CASE)
 
-    private data class ProfileLimitationMeta(
+    internal data class ProfileLimitationMeta(
         val transferLimitBytes: Long = 0L,
         val downloadLimitBytes: Long = 0L,
         val uploadLimitBytes: Long = 0L,
@@ -206,13 +214,13 @@ object MikrotikSyncManager {
             // Ensure socket is open before querying profiles (recovers automatically if any probe timed out)
             client.ensureConnected(credentials).getOrElse { return@withContext Result.failure(it) }
 
-            // 1. Fetch ALL User Manager profiles + limitations (resolving both name and .id links)
+            // 1. Fetch ALL User Manager profiles + detect authoritative v6 (/tool/user-manager) vs v7 (/user-manager) prefix
             onProgress(20, "جاري جلب جميع باقات يوزر منجر وحدود الصلاحية...")
-            val rawProfileRecords = fetchRawProfileRecords(client, credentials, isV7)
+            val (resolvedIsV7, rawProfileRecords) = fetchRawProfileRecordsWithDetectedMode(client, credentials, isV7)
             val limitationsByProfile = fetchProfileLimitationsBestEffort(
                 client = client,
                 credentials = credentials,
-                isV7 = isV7,
+                isV7 = resolvedIsV7,
                 rawProfileRecords = rawProfileRecords
             ).toMutableMap()
             client.ensureConnected(credentials).getOrElse { return@withContext Result.failure(it) }
@@ -259,7 +267,7 @@ object MikrotikSyncManager {
             val cardsResult = fetchAllUserManagerCardsStreaming(
                 client = client,
                 credentials = credentials,
-                isV7 = isV7,
+                isV7 = resolvedIsV7,
                 serverAccount = credentials.username,
                 priceByPackage = priceByPackage,
                 limitationsByProfile = limitationsByProfile,
@@ -320,7 +328,7 @@ object MikrotikSyncManager {
                 fetchUserManagerSalesAndReportsInternal(
                     client = client,
                     credentials = credentials,
-                    isV7 = isV7,
+                    isV7 = resolvedIsV7,
                     sysStatus = sysStatus,
                     serverAccount = credentials.username,
                     cards = fetchedCards,
@@ -392,8 +400,10 @@ object MikrotikSyncManager {
             val primaryStream = client.executeStreaming(primaryCmd, listOf("?user=$cleanUser"), timeoutMs = 45000) { _, rec ->
                 sessions.add(parseSessionRecord(cleanUser, rec, nowMillis))
             }
-            if (primaryStream.isFailure || primaryStream.getOrNull()?.isSuccess != true) {
+            val primaryTrap = primaryStream.getOrNull()?.trapMessage ?: primaryStream.exceptionOrNull()?.message
+            if (sessions.isEmpty() && isNoSuchCommandPrefixError(primaryTrap)) {
                 sessions.clear()
+                client.ensureConnected(credentials)
                 client.executeStreaming(fallbackCmd, listOf("?user=$cleanUser"), timeoutMs = 45000) { _, rec ->
                     sessions.add(parseSessionRecord(cleanUser, rec, nowMillis))
                 }
@@ -488,7 +498,7 @@ object MikrotikSyncManager {
             }
 
             val sysStatus = fetchSystemStatusInternal(client, credentials)
-            val isV7 = sysStatus.routerOsVersion.trim().startsWith("7")
+            var resolvedIsV7 = sysStatus.routerOsVersion.trim().startsWith("7")
             val total = cards.size
             val pushedCards = mutableListOf<CardEntity>()
             var addedCount = 0
@@ -496,12 +506,26 @@ object MikrotikSyncManager {
             var lastRouterError: String? = null
 
             cards.forEachIndexed { idx, card ->
-                val pushRes = pushSingleUserManagerCardInternal(
+                var pushRes = pushSingleUserManagerCardInternal(
                     client = client,
-                    isV7 = isV7,
+                    isV7 = resolvedIsV7,
                     customer = credentials.username,
                     card = card
                 )
+                if (pushRes.isFailure && isNoSuchCommandPrefixError(pushRes.exceptionOrNull()?.message)) {
+                    val altIsV7 = !resolvedIsV7
+                    client.ensureConnected(credentials)
+                    val altRes = pushSingleUserManagerCardInternal(
+                        client = client,
+                        isV7 = altIsV7,
+                        customer = credentials.username,
+                        card = card
+                    )
+                    if (altRes.isSuccess) {
+                        resolvedIsV7 = altIsV7
+                        pushRes = altRes
+                    }
+                }
                 if (pushRes.isSuccess) {
                     val createdId = pushRes.getOrNull()
                     val persistedCard = card.copy(
@@ -553,11 +577,12 @@ object MikrotikSyncManager {
             val loginRes = client.connectAndLogin(credentials)
             if (loginRes.isFailure) return@withContext Result.failure(loginRes.exceptionOrNull()!!)
             val sysStatus = fetchSystemStatusInternal(client, credentials)
-            val isV7 = sysStatus.routerOsVersion.trim().startsWith("7")
+            val guessedIsV7 = sysStatus.routerOsVersion.trim().startsWith("7")
+            val (resolvedIsV7, _) = fetchRawProfileRecordsWithDetectedMode(client, credentials, guessedIsV7)
 
             var removed = 0
             for (card in cards) {
-                val ok = deleteSingleUserManagerCardInternal(client, isV7, card)
+                val ok = deleteSingleUserManagerCardInternal(client, resolvedIsV7, card)
                 if (ok) removed++
             }
             Result.success(removed)
@@ -695,22 +720,28 @@ object MikrotikSyncManager {
         )
     }
 
-    private suspend fun fetchRawProfileRecords(
+    internal suspend fun fetchRawProfileRecordsWithDetectedMode(
         client: MikrotikApiClient,
         credentials: MikrotikCredentials,
-        isV7: Boolean
-    ): List<Map<String, String>> {
-        val primaryCmd = if (isV7) "/user-manager/profile/print" else "/tool/user-manager/profile/print"
-        val fallbackCmd = if (isV7) "/tool/user-manager/profile/print" else "/user-manager/profile/print"
+        guessedIsV7: Boolean
+    ): Pair<Boolean, List<Map<String, String>>> {
+        val primaryCmd = if (guessedIsV7) "/user-manager/profile/print" else "/tool/user-manager/profile/print"
+        val fallbackCmd = if (guessedIsV7) "/tool/user-manager/profile/print" else "/user-manager/profile/print"
 
         client.ensureConnected(credentials)
         val primaryRes = client.execute(primaryCmd, timeoutMs = 30000).getOrNull()
         if (primaryRes != null && primaryRes.isSuccess) {
-            return primaryRes.records
+            return guessedIsV7 to primaryRes.records
         }
-        client.ensureConnected(credentials)
-        return client.execute(fallbackCmd, timeoutMs = 30000).getOrNull()
-            ?.takeIf { it.isSuccess }?.records.orEmpty()
+        // Only switch User Manager prefix when RouterOS reports command-prefix mismatch (or primary returned no result)
+        if (primaryRes == null || isNoSuchCommandPrefixError(primaryRes.trapMessage)) {
+            client.ensureConnected(credentials)
+            val fallbackRes = client.execute(fallbackCmd, timeoutMs = 30000).getOrNull()
+            if (fallbackRes != null && fallbackRes.isSuccess) {
+                return (!guessedIsV7) to fallbackRes.records
+            }
+        }
+        return guessedIsV7 to emptyList()
     }
 
     private suspend fun fetchProfileLimitationsBestEffort(
@@ -754,15 +785,36 @@ object MikrotikSyncManager {
         }
 
         runCatching {
-            client.ensureConnected(credentials)
-            val limCmd = if (isV7) "/user-manager/limitation/print" else "/tool/user-manager/profile/limitation/print"
-            val linkCmd = if (isV7) "/user-manager/profile-limitation/print" else "/tool/user-manager/profile/profile-limitation/print"
+            val limCandidates = if (isV7) {
+                listOf("/user-manager/limitation/print")
+            } else {
+                listOf("/tool/user-manager/profile/limitation/print", "/tool/user-manager/limitation/print")
+            }
+            val linkCandidates = if (isV7) {
+                listOf("/user-manager/profile-limitation/print")
+            } else {
+                listOf("/tool/user-manager/profile/profile-limitation/print", "/tool/user-manager/profile-limitation/print")
+            }
 
-            val limRecords = client.execute(limCmd, timeoutMs = 20000).getOrNull()
-                ?.takeIf { it.isSuccess }?.records.orEmpty()
-            client.ensureConnected(credentials)
-            val linkRecords = client.execute(linkCmd, timeoutMs = 20000).getOrNull()
-                ?.takeIf { it.isSuccess }?.records.orEmpty()
+            var limRecords = emptyList<Map<String, String>>()
+            for (cmd in limCandidates) {
+                client.ensureConnected(credentials)
+                val res = client.execute(cmd, timeoutMs = 20000).getOrNull()
+                if (res != null && res.isSuccess) {
+                    limRecords = res.records
+                    break
+                }
+            }
+
+            var linkRecords = emptyList<Map<String, String>>()
+            for (cmd in linkCandidates) {
+                client.ensureConnected(credentials)
+                val res = client.execute(cmd, timeoutMs = 20000).getOrNull()
+                if (res != null && res.isSuccess) {
+                    linkRecords = res.records
+                    break
+                }
+            }
 
             if (limRecords.isEmpty()) return result
 
@@ -852,7 +904,7 @@ object MikrotikSyncManager {
         return result.values.toList()
     }
 
-    private suspend fun fetchAllUserManagerCardsStreaming(
+    internal suspend fun fetchAllUserManagerCardsStreaming(
         client: MikrotikApiClient,
         credentials: MikrotikCredentials,
         isV7: Boolean,
@@ -861,23 +913,26 @@ object MikrotikSyncManager {
         limitationsByProfile: Map<String, ProfileLimitationMeta>,
         onCountProgress: (Int) -> Unit
     ): Result<List<CardEntity>> {
-        return if (isV7) {
-            val v7Res = fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
-            if (v7Res.isSuccess) {
-                v7Res
-            } else {
-                client.ensureConnected(credentials)
-                fetchV6CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
-            }
+        val primaryRes = if (isV7) {
+            fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
         } else {
-            val v6Res = fetchV6CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
-            if (v6Res.isSuccess) {
-                v6Res
+            fetchV6CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
+        }
+        if (primaryRes.isSuccess) return primaryRes
+
+        // Only try the opposite RouterOS prefix when the router explicitly reported a command-prefix mismatch.
+        // Never overwrite a real v6/v7 transport or timeout error with a bogus "no such command prefix" from the wrong version!
+        val primaryErrMsg = primaryRes.exceptionOrNull()?.message
+        if (isNoSuchCommandPrefixError(primaryErrMsg)) {
+            client.ensureConnected(credentials)
+            val fallbackRes = if (isV7) {
+                fetchV6CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
             } else {
-                client.ensureConnected(credentials)
                 fetchV7CardsStreaming(client, credentials, serverAccount, priceByPackage, limitationsByProfile, onCountProgress)
             }
+            if (fallbackRes.isSuccess) return fallbackRes
         }
+        return primaryRes
     }
 
     private suspend fun fetchV6CardsStreaming(
@@ -981,9 +1036,9 @@ object MikrotikSyncManager {
             )
         }
 
-        // Request only the needed User Manager attributes first (3x-4x faster for 50,000+ cards)
+        // Use strictly valid RouterOS v6 User Manager user attributes for fast streaming (3x-4x faster for 50,000+ cards)
         val fastProplist = listOf(
-            "=.proplist=.id,username,name,password,customer,actual-profile,profile,comment,download-used,upload-used,uptime-used,disabled,active,last-seen,end-time,till-time"
+            "=.proplist=.id,username,password,customer,actual-profile,comment,download-used,upload-used,uptime-used,disabled,active,last-seen"
         )
         var streamRes = client.executeStreaming(
             command = "/tool/user-manager/user/print",
@@ -991,9 +1046,10 @@ object MikrotikSyncManager {
             timeoutMs = STREAM_BULK_TIMEOUT_MS
         ) { idx, u -> processV6User(idx, u) }
 
-        // Fallback to full record print if an older RouterOS v6 build traps on proplist
-        if (result.isEmpty() && (streamRes.isFailure || streamRes.getOrNull()?.isSuccess != true)) {
-            client.ensureConnected(credentials)
+        val firstTrap = streamRes.getOrNull()?.trapMessage ?: streamRes.exceptionOrNull()?.message
+        // Retry without .proplist on any non-prefix error or empty proplist output (handles older RouterOS v6 builds safely)
+        if ((streamRes.isFailure || streamRes.getOrNull()?.isSuccess != true || result.isEmpty()) && !isNoSuchCommandPrefixError(firstTrap)) {
+            client.connectAndLogin(credentials)
             result.clear()
             streamRes = client.executeStreaming(
                 command = "/tool/user-manager/user/print",
@@ -1003,10 +1059,18 @@ object MikrotikSyncManager {
         }
 
         if (streamRes.isFailure) {
+            if (result.isNotEmpty()) {
+                onCountProgress(result.size)
+                return Result.success(result.values.toList())
+            }
             return Result.failure(streamRes.exceptionOrNull() ?: IOException("تعذر قراءة كروت يوزر منجر (v6)."))
         }
         val sr = streamRes.getOrThrow()
         if (!sr.isSuccess) {
+            if (result.isNotEmpty()) {
+                onCountProgress(result.size)
+                return Result.success(result.values.toList())
+            }
             return Result.failure(IOException(sr.trapMessage ?: "رفض المايكروتيك أمر قراءة كروت يوزر منجر (v6)."))
         }
         onCountProgress(result.size)
@@ -1060,17 +1124,14 @@ object MikrotikSyncManager {
         client.ensureConnected(credentials).getOrElse { return Result.failure(it) }
         val result = LinkedHashMap<String, CardEntity>(4096)
         val baseNow = System.currentTimeMillis()
-        val userStreamRes = client.executeStreaming(
-            command = "/user-manager/user/print",
-            params = listOf("=.proplist=.id,name,password,group,comment,disabled"),
-            timeoutMs = STREAM_BULK_TIMEOUT_MS
-        ) { idx, u ->
+
+        fun processV7User(idx: Int, u: Map<String, String>) {
             val count = idx + 1
             if (count % 500 == 0) {
                 onCountProgress(count)
             }
-            val uname = u["name"].orEmpty().trim()
-            if (uname.isBlank()) return@executeStreaming
+            val uname = (u["name"] ?: u["username"]).orEmpty().trim()
+            if (uname.isBlank()) return
 
             val upList = profilesByUser[uname].orEmpty()
             val runningEntry = upList.lastOrNull { it.second.contains("running") || it.second.contains("active") }
@@ -1134,11 +1195,36 @@ object MikrotikSyncManager {
             )
         }
 
+        var userStreamRes = client.executeStreaming(
+            command = "/user-manager/user/print",
+            params = listOf("=.proplist=.id,name,password,group,comment,disabled"),
+            timeoutMs = STREAM_BULK_TIMEOUT_MS
+        ) { idx, u -> processV7User(idx, u) }
+
+        val firstV7Trap = userStreamRes.getOrNull()?.trapMessage ?: userStreamRes.exceptionOrNull()?.message
+        if ((userStreamRes.isFailure || userStreamRes.getOrNull()?.isSuccess != true || result.isEmpty()) && !isNoSuchCommandPrefixError(firstV7Trap)) {
+            client.connectAndLogin(credentials)
+            result.clear()
+            userStreamRes = client.executeStreaming(
+                command = "/user-manager/user/print",
+                params = emptyList(),
+                timeoutMs = STREAM_BULK_TIMEOUT_MS
+            ) { idx, u -> processV7User(idx, u) }
+        }
+
         if (userStreamRes.isFailure) {
+            if (result.isNotEmpty()) {
+                onCountProgress(result.size)
+                return Result.success(result.values.toList())
+            }
             return Result.failure(userStreamRes.exceptionOrNull() ?: IOException("تعذر قراءة كروت يوزر منجر (v7)."))
         }
         val sr = userStreamRes.getOrThrow()
         if (!sr.isSuccess) {
+            if (result.isNotEmpty()) {
+                onCountProgress(result.size)
+                return Result.success(result.values.toList())
+            }
             return Result.failure(IOException(sr.trapMessage ?: "رفض المايكروتيك أمر قراءة كروت يوزر منجر (v7)."))
         }
         onCountProgress(result.size)
@@ -1278,13 +1364,23 @@ object MikrotikSyncManager {
             params = sessProplistPrimary,
             timeoutMs = SESSIONS_BULK_TIMEOUT_MS
         ) { _, rec -> handleSessionRecord(rec) }
+        val sessTrap = sessRes.getOrNull()?.trapMessage ?: sessRes.exceptionOrNull()?.message
         if (sessionsScanned == 0 && (sessRes.isFailure || sessRes.getOrNull()?.isSuccess != true)) {
-            client.ensureConnected(credentials)
-            client.executeStreaming(
-                command = sessFallback,
-                params = sessProplistFallback,
-                timeoutMs = SESSIONS_BULK_TIMEOUT_MS
-            ) { _, rec -> handleSessionRecord(rec) }
+            if (isNoSuchCommandPrefixError(sessTrap)) {
+                client.ensureConnected(credentials)
+                client.executeStreaming(
+                    command = sessFallback,
+                    params = sessProplistFallback,
+                    timeoutMs = SESSIONS_BULK_TIMEOUT_MS
+                ) { _, rec -> handleSessionRecord(rec) }
+            } else {
+                client.ensureConnected(credentials)
+                client.executeStreaming(
+                    command = sessPrimary,
+                    params = emptyList(),
+                    timeoutMs = SESSIONS_BULK_TIMEOUT_MS
+                ) { _, rec -> handleSessionRecord(rec) }
+            }
         }
 
         // 2. Stream User Manager payments as secondary fallback when sessions are unavailable
@@ -1370,13 +1466,22 @@ object MikrotikSyncManager {
                 params = payProplist,
                 timeoutMs = SESSIONS_BULK_TIMEOUT_MS
             ) { _, rec -> handlePaymentRecord(rec) }
+            val payTrap = payRes.getOrNull()?.trapMessage ?: payRes.exceptionOrNull()?.message
             if (paymentsCount == 0 && (payRes.isFailure || payRes.getOrNull()?.isSuccess != true)) {
                 client.ensureConnected(credentials)
-                client.executeStreaming(
-                    command = payFallback,
-                    params = payProplist,
-                    timeoutMs = SESSIONS_BULK_TIMEOUT_MS
-                ) { _, rec -> handlePaymentRecord(rec) }
+                if (isNoSuchCommandPrefixError(payTrap)) {
+                    client.executeStreaming(
+                        command = payFallback,
+                        params = payProplist,
+                        timeoutMs = SESSIONS_BULK_TIMEOUT_MS
+                    ) { _, rec -> handlePaymentRecord(rec) }
+                } else {
+                    client.executeStreaming(
+                        command = payPrimary,
+                        params = emptyList(),
+                        timeoutMs = SESSIONS_BULK_TIMEOUT_MS
+                    ) { _, rec -> handlePaymentRecord(rec) }
+                }
             }
         }
 
